@@ -1,0 +1,7 @@
+# data and artifacts are never committed
+data/
+artifacts/
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
