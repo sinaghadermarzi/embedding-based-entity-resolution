@@ -100,20 +100,23 @@ the notebook *before* the affected runs execute.
 - **TRN-01:** loss {InfoNCE, SupCon, triplet, CoSENT} × encoder regime {pretrained-subword,
   scratch-char/byte} — 8 cells.
 - **TRN-02:** miner {in-batch, BM25-mined, ANN-mined, ANN + cluster-aware FN filter} × residual
-  duplication rate {low, medium, high} — 12 cells.
+  duplication rate {low, medium, high} — 12 cells, run at the pretrained-subword regime
+  (scratch-char spot-checked at the winning miner).
 - **TRN-03:** augmentation {none, generic typo, calibrated channels} × encoder regime — 6 cells,
   plus a dose–response dial on calibrated-augmentation rate within the winning cell (for the
   mediation analysis, §5).
-- **TRN-04:** carried as the encoder-regime factor inside TRN-01/02/03, plus one dedicated
+- **TRN-04:** carried as the encoder-regime factor inside TRN-01/03, plus one dedicated
   matched-budget head-to-head at each regime's own winning training recipe — 2 cells.
 - **TRN-05:** serialization {[COL]/[VAL], template, JSON, bare} × missing-field treatment
   {[MISSING] token, drop} — 8 cells; field-order sensitivity is an evaluation-time probe, not a
   training factor.
 - **TRN-06:** nickname supervision {off, lexicon pairs} — 2 cells, scored on the nickname slice AND
   the twin/Jr-Sr must-not-merge slice.
-- **Cross-pressure interaction study** (the only anticipated fractionalization site): winning
-  levels of TRN-01/02/03/05 in a 2⁴ factorial at mid tier; if MET-04's power table rules the full
-  factorial unaffordable, a resolution-IV 2⁴⁻¹ half fraction per §10.1.
+- **Cross-pressure interaction study** (the only anticipated fractionalization site): each of
+  TRN-01/02/03/05 contrasted at two levels — its winning level vs its pre-registered default level —
+  in a 2⁴ factorial at mid tier; if MET-04's power table rules the full factorial unaffordable, a
+  resolution-IV 2⁴⁻¹ half fraction per §10.1, whose alias table must name which two-factor
+  interactions the I=ABCD-style generator sacrifices.
 
 Every cell runs with ≥3–5 seeds × noise draws per MET-04; all cells share replicate sets for paired
 comparison.
@@ -183,10 +186,10 @@ verdict boxes at the end. Figures render only from registered artifacts.
 | 08 | A Person as a Vector | First embeddings; TRN-05 serialization; invariance battery + geometry panel debut |
 | 09 | Pressures I: Losses and Negatives | TRN-01/02 with MET-04 variance/power machinery; the FN-contamination trap |
 | 10 | Pressures II: Typos — Tokenizer or Augmentation? | TRN-03/04: 2×2 {pretrained-subword, scratch-char} × {augmentation, none} |
-| 11 | Pressures III: Nicknames, Missing Fields, and the Circular Teacher | TRN-06; missing-field treatments; label-provenance circularity (FS-links vs NCID as teacher) |
+| 11 | Pressures III: Nicknames, Missing Fields, and the Circular Teacher | TRN-06; TRN-05's missing-field factor; label-provenance circularity (FS-links vs NCID as teacher) |
 | 12 | Finding Candidates in Ten Million | BAS-02 sparse-vs-dense head-to-head at matched budgets |
 | 13 | From Pairs to People | CAL-01 calibration; CLU-01 clustering; percolation onset |
-| 14 | Where Rules Earn Their Place | HYB-01 noise-regime map with significance shading; PRS-01 parsing factorial |
+| 14 | Where Rules Earn Their Place | HYB-01 noise-regime map with significance shading; NSE-03 ranking invariance across noise models; PRS-01 parsing factorial |
 | 15 | The Last Two Orders of Magnitude | SCL-01/02 ladder + EVT/hubness; EFF-01; SCL-03 cost model; SCL-04 ambiguity budget; MEASURED-vs-EXTRAPOLATED visual convention |
 | 16 | Unequal Noise, Unequal Errors | FAIR-01 both-sides disparity; exposure-vs-mechanism decomposition; label-error robustness bands |
 | 17 | The Verdict at 1e7 | Headline hybrid-vs-FS-vs-pure comparison under full protocol; honesty audit |
@@ -195,8 +198,10 @@ verdict boxes at the end. Figures render only from registered artifacts.
 
 ## 7. Package and infrastructure
 
-Thin `src/er_lab`: `config` (OmegaConf structured configs, **dotlist overrides**, config-hash, seed
-lists) · `infra/device` (MPS/CUDA/CPU detection, per-backend precision policy, opt-in
+Thin `src/er_lab`: `config` (OmegaConf structured configs with **dotlist overrides** — encoder
+model, batch size, and numeric precision are user-facing keys, e.g. `model.name=…`
+`train.batch_size=…` `infra.precision=bf16`; config-hash, seed lists) · `infra/device` (MPS/CUDA/CPU
+detection; per-backend precision policy supplies defaults the dotlist overrides; opt-in
 accelerate/torchrun) · `infra/artifacts` (hashed run registry — figures render only from registered
 artifacts) · `infra/runner` (headless notebook DAG, hard-fail on missing upstream artifacts, no
 smoke/target mixing) · `data/{schema,nc,loaders}` · `noise/{channels,exposure,audit}` · `serialize` ·
@@ -227,7 +232,7 @@ in CI); cross-backend reproducibility policy with stated per-metric tolerances (
 
 ## 9. Scope decisions (the guards)
 
-**In:** dedup primary + one linkage chapter (ADP-01 conversion, ADP-02 target arm); all four noise axes with measured prevalence; both model
+**In:** dedup primary + one linkage chapter (ADP-01 conversion, ADP-02 target arm); all four noise axes (typos/OCR; nicknames & cultural name variants; missing/swapped/dirty fields; temporal drift & household confusables) with measured prevalence; both model
 regimes head-to-head; sparse-vs-dense adjudication; fairness as measurement-with-robustness-bands
 (deliberately not the headline); US/English resources with the limitation stated on every affected
 claim.
@@ -251,7 +256,10 @@ Approving this plan locks:
    any fraction must be resolution ≥ IV, must leave all main effects and the two named interactions
    of interest (loss × encoder-regime, augmentation × encoder-regime) unaliased, and its alias table
    is rendered in the notebook before the affected runs execute — never chosen after results are
-   seen.
+   seen. The two named interactions are binding where their factors co-occur (TRN-01/TRN-03, which
+   carry the encoder-regime factor); for the cross-pressure 2⁴⁻¹ (§3.1), whose factors exclude
+   encoder regime, the alias table must instead name which two-factor interactions the chosen
+   generator sacrifices.
 2. Operating-point defaults: entity-precision {0.99, 0.995} + cost grid {1:1, 1:10, 1:100};
    fixed-FP-budget secondary at scale tiers.
 3. Data commitments: NC (audit + gated truth arms), own generator, BPID (user downloads), ONC
