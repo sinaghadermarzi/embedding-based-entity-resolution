@@ -45,10 +45,11 @@ from __future__ import annotations
 import string
 import tempfile
 import warnings
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Mapping, Protocol, Sequence
+from typing import Protocol
 
 import numpy as np
 import pandas as pd
@@ -56,24 +57,26 @@ from gecko import GeckoWarning
 from gecko import mutator as gmut
 
 __all__ = [
-    "Channel",
     "CHANNELS",
     "OPS_COLUMNS",
-    "ops_frame",
-    "match_case",
-    "parse_dob",
-    "typo",
-    "ocr",
-    "phonetic_spelling",
-    "nickname",
-    "name_order_swap",
+    "Channel",
+    "cell_eq",
+    "fetch_lexicon",
     "field_dropout",
     "field_format_drift",
-    "suffix_confusion",
+    "get_cell",
     "hub_value",
-    "raw_unparse",
-    "fetch_lexicon",
     "load_lexicon",
+    "match_case",
+    "name_order_swap",
+    "nickname",
+    "ocr",
+    "ops_frame",
+    "parse_dob",
+    "phonetic_spelling",
+    "raw_unparse",
+    "suffix_confusion",
+    "typo",
 ]
 
 OPS_COLUMNS = ["record_id", "channel", "field", "before", "after"]
@@ -125,7 +128,7 @@ def parse_dob(value: str) -> tuple[datetime | None, str | None]:
     """Parse a dob string against ``DOB_FORMATS``; return (datetime, format) or (None, None)."""
     for fmt in DOB_FORMATS:
         try:
-            return datetime.strptime(value, fmt), fmt
+            return datetime.strptime(value, fmt), fmt  # noqa: DTZ007 - dates, not instants
         except ValueError:
             continue
     return None, None
@@ -141,8 +144,12 @@ def _rates_array(rate_per_record: pd.Series | float, n: int) -> np.ndarray:
     return np.clip(arr, 0.0, 1.0)
 
 
-def _get(out: pd.DataFrame, pos: int, fld: str) -> str | None:
-    """Value of cell (pos, fld) as str, or None when the column/value is absent/empty."""
+def get_cell(out: pd.DataFrame, pos: int, fld: str) -> str | None:
+    """Value of cell (pos, fld) as str, or None when the column/value is absent/empty.
+
+    Shared with ``er_lab.noise.generate`` — the single definition of what counts
+    as a present cell value.
+    """
     if fld not in out.columns:
         return None
     v = out[fld].iloc[pos]
@@ -151,7 +158,11 @@ def _get(out: pd.DataFrame, pos: int, fld: str) -> str | None:
     return str(v)
 
 
-def _cell_eq(a: object, b: object) -> bool:
+def cell_eq(a: object, b: object) -> bool:
+    """NA-aware scalar cell equality (NA == NA; NA != any value).
+
+    Shared with ``er_lab.noise.generate`` — the single definition of cell equality.
+    """
     a_na, b_na = bool(pd.isna(a)), bool(pd.isna(b))
     if a_na or b_na:
         return a_na and b_na
@@ -237,7 +248,7 @@ class GeckoMutatorChannel:
         chosen: dict[str, list[int]] = {}
         for pos in selected:
             pos = int(pos)
-            applicable = [f for f in fields if _get(out, pos, f) is not None]
+            applicable = [f for f in fields if get_cell(out, pos, f) is not None]
             if not applicable:
                 continue
             fld = applicable[int(rng.integers(len(applicable)))]
@@ -334,6 +345,7 @@ def _qwerty_keymap_path() -> Path:
 
 # --- embedded OCR confusion table (GeCO-lineage; both directions explicit) --
 
+# fmt: off
 _OCR_PAIRS: tuple[tuple[str, str], ...] = (
     ("0", "O"), ("O", "0"), ("1", "I"), ("I", "1"), ("1", "l"), ("l", "1"),
     ("5", "S"), ("S", "5"), ("8", "B"), ("B", "8"), ("2", "Z"), ("Z", "2"),
@@ -341,6 +353,7 @@ _OCR_PAIRS: tuple[tuple[str, str], ...] = (
     ("D", "O"), ("m", "rn"), ("rn", "m"), ("cl", "d"), ("d", "cl"),
     ("w", "vv"), ("vv", "w"), ("g", "q"), ("q", "g"),
 )
+# fmt: on
 
 # --- embedded phonetic rules (GeCO-lineage; flags: ^ start, $ end, _ middle,
 #     "" = anywhere). Case variants generated below. --------------------------
@@ -529,7 +542,7 @@ def nickname(lexicon: Mapping[str, set[str]] | None = None) -> Channel:
     candidates = _nickname_candidates(_DEFAULT_LEXICON if lexicon is None else lexicon)
 
     def edit(out: pd.DataFrame, pos: int, rng: np.random.Generator) -> list[Edit]:
-        value = _get(out, pos, "given_name")
+        value = get_cell(out, pos, "given_name")
         if value is None:
             return []
         options = candidates.get(value.lower())
@@ -553,7 +566,7 @@ def name_order_swap() -> Channel:
     """Swap given_name and family_name (both cells logged)."""
 
     def edit(out: pd.DataFrame, pos: int, rng: np.random.Generator) -> list[Edit]:
-        g, f = _get(out, pos, "given_name"), _get(out, pos, "family_name")
+        g, f = get_cell(out, pos, "given_name"), get_cell(out, pos, "family_name")
         if g is None or f is None or g == f:
             return []
         return [("given_name", g, f), ("family_name", f, g)]
@@ -566,11 +579,11 @@ def field_dropout(fields: Sequence[str] = _DROPOUT_FIELDS) -> Channel:
     fields = tuple(fields)
 
     def edit(out: pd.DataFrame, pos: int, rng: np.random.Generator) -> list[Edit]:
-        present = [f for f in fields if _get(out, pos, f) is not None]
+        present = [f for f in fields if get_cell(out, pos, f) is not None]
         if not present:
             return []
         fld = present[int(rng.integers(len(present)))]
-        return [(fld, _get(out, pos, fld), pd.NA)]
+        return [(fld, get_cell(out, pos, fld), pd.NA)]
 
     return PerRecordChannel(name="field_dropout", edit_fn=edit)
 
@@ -613,14 +626,14 @@ def field_format_drift() -> Channel:
 
     def edit(out: pd.DataFrame, pos: int, rng: np.random.Generator) -> list[Edit]:
         options: list[str] = []
-        dob = _get(out, pos, "dob")
+        dob = get_cell(out, pos, "dob")
         if dob is not None and parse_dob(dob)[0] is not None:
             options.append("dob")
         for fld in ("street_address", "street"):
-            v = _get(out, pos, fld)
+            v = get_cell(out, pos, fld)
             if v is not None and any(w.upper() in _ADDR_WORDMAP for w in v.split(" ")):
                 options.append(fld)
-        phone = _get(out, pos, "phone")
+        phone = get_cell(out, pos, "phone")
         if phone is not None and _phone_variants(phone):
             options.append("phone")
         if not options:
@@ -635,7 +648,7 @@ def field_format_drift() -> Channel:
         if fld == "phone":
             variants = _phone_variants(phone)  # type: ignore[arg-type]
             return [("phone", phone, variants[int(rng.integers(len(variants)))])]
-        value = _get(out, pos, fld)
+        value = get_cell(out, pos, fld)
         words = value.split(" ")  # type: ignore[union-attr]
         hits = [i for i, w in enumerate(words) if w.upper() in _ADDR_WORDMAP]
         i = hits[int(rng.integers(len(hits)))]
@@ -662,10 +675,10 @@ def suffix_confusion() -> Channel:
         if "name_suffix" not in out.columns:
             return []
         raw = out["name_suffix"].iloc[pos]
-        cur = _get(out, pos, "name_suffix")
+        cur = get_cell(out, pos, "name_suffix")
         if cur is None:  # add a suffix
             pick = ("jr", "sr", "ii")[int(rng.choice(3, p=[0.5, 0.25, 0.25]))]
-            template = _get(out, pos, "family_name") or "Xx"
+            template = get_cell(out, pos, "family_name") or "Xx"
             return [("name_suffix", raw, match_case(template, pick))]
         if rng.random() < 0.5:  # drop
             return [("name_suffix", cur, pd.NA)]
@@ -704,17 +717,17 @@ def hub_value() -> Channel:
             return []
         fld = options[int(rng.integers(len(options)))]
         raw = out[fld].iloc[pos]
-        cur = _get(out, pos, fld)
+        cur = get_cell(out, pos, fld)
         if fld == "dob":
             fmt = parse_dob(cur)[1] if cur is not None else None
-            hub = datetime(1900, 1, 1).strftime(fmt or "%Y-%m-%d")
+            hub = datetime(1900, 1, 1).strftime(fmt or "%Y-%m-%d")  # noqa: DTZ001
         elif fld == "birth_year":
             hub = HUB_BIRTH_YEAR
         elif fld == "phone":
             hub = HUB_PHONE
         else:
             hub = HUB_ADDRESS
-        if _cell_eq(raw, hub):
+        if cell_eq(raw, hub):
             return []
         return [(fld, raw, hub)]
 
@@ -743,12 +756,12 @@ def raw_unparse() -> Channel:
 
     def edit(out: pd.DataFrame, pos: int, rng: np.random.Generator) -> list[Edit]:
         edits: list[Edit] = []
-        g, f = _get(out, pos, "given_name"), _get(out, pos, "family_name")
+        g, f = get_cell(out, pos, "given_name"), get_cell(out, pos, "family_name")
         if g is not None and f is not None and "full_name" in out.columns:
-            m, s = _get(out, pos, "middle_name"), _get(out, pos, "name_suffix")
+            m, s = get_cell(out, pos, "middle_name"), get_cell(out, pos, "name_suffix")
             full = f"{f}, {g}" + (f" {m[0]}" if m else "") + (f" {s}" if s else "")
             cur_full = out["full_name"].iloc[pos]
-            if not _cell_eq(cur_full, full):
+            if not cell_eq(cur_full, full):
                 edits.append(("full_name", cur_full, full))
             edits.append(("given_name", g, pd.NA))
             edits.append(("family_name", f, pd.NA))
@@ -756,12 +769,12 @@ def raw_unparse() -> Channel:
                 edits.append(("middle_name", m, pd.NA))
             if s is not None:
                 edits.append(("name_suffix", s, pd.NA))
-        st = _get(out, pos, "street")
+        st = get_cell(out, pos, "street")
         if st is not None and "street_address" in out.columns:
-            hn, un = _get(out, pos, "house_number"), _get(out, pos, "unit")
+            hn, un = get_cell(out, pos, "house_number"), get_cell(out, pos, "unit")
             addr = " ".join(p for p in (hn, st, un) if p is not None)
             cur_addr = out["street_address"].iloc[pos]
-            if not _cell_eq(cur_addr, addr):
+            if not cell_eq(cur_addr, addr):
                 edits.append(("street_address", cur_addr, addr))
             if hn is not None:
                 edits.append(("house_number", hn, pd.NA))
