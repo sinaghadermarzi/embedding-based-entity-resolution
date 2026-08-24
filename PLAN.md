@@ -1,8 +1,9 @@
 # PLAN — The Person-ER Embedding Lab
 
-> **Status: awaiting sign-off.** This plan is presented for approval before any code is built (Stage B).
-> The literature grounding is in [`notes/lit_review.md`](notes/lit_review.md). The sign-off gate — the
-> specific decisions that get locked when you approve — is [§10](#10-sign-off-gate).
+> **Status: signed off 2026-08-24 — Stage B (build) in progress.** The sign-off gate ([§10](#10-sign-off-gate))
+> is resolved: hardware pinned (mac = M2 Max 96GB; node = 4×A100 80GB, the hard ceiling), pseudopeople
+> data-access request deferred as optional-later. The literature grounding is in
+> [`notes/lit_review.md`](notes/lit_review.md). Changes to locked items now go through the §10 changelog.
 
 ## 1. What this lab is
 
@@ -45,10 +46,14 @@ extrapolation.
   Two-source linkage appears in one adaptation chapter (notebook 18): ADP-01 converts the pipeline
   to linkage mode (ONC; BPID fallback), and ADP-02 exercises that mode once at target tier as an
   NC↔OH cross-state arm.
-- **Tiers:** `smoke` (1e5–1e6 records; runs live on a 4-CPU/15GB container, CPU-only) → `mid`
-  (~1e6; one GPU or Apple Silicon) → `target` (~1e7 max live) → `analytical` (1e8–1e9 by validated
-  extrapolation + cost/ambiguity modeling only). A `# [RUN-IN-TARGET]` cell is the *same cell* with
-  `tier=target` — one code path, no forked logic.
+- **Tiers and hardware (resolved at sign-off):** `smoke` (1e5–1e6 records; runs live on a
+  4-CPU/15GB container, CPU-only) → `mid` (~1e6; definitive home: the lab's **mac** — M2 Max, 96GB
+  unified memory, MPS) → `target` (~1e7 max live; definitive home: the lab's **node** — one machine,
+  4×A100 80GB, 900GB RAM, 90 cores) → `analytical` (1e8–1e9 by validated extrapolation +
+  cost/ambiguity modeling only). Policy: **mac-first** — every cell that fits the Mac runs there;
+  the RUN-IN-TARGET manifest labels each heavy cell `mac` or `node`; **nothing in the lab may
+  require more than the single node** — no cluster paths anywhere. A `# [RUN-IN-TARGET]` cell is
+  the *same cell* with `tier=target` — one code path, no forked logic.
 
 ## 3. Experiment matrix
 
@@ -133,7 +138,7 @@ The repo ships **download scripts + checksums, never data**. Per-source terms li
 | **BPID** (Zenodo 13932202, Apache-2.0; 1M synthetic PII profiles + 10k labeled pairs) | Independent benchmark arm; its corruption model scored in NSE-02; ADP-01 fallback target | User-side download (host blocked from build sandbox) |
 | **ONC patient-matching** (1M records, full DOB+SSN) | ADP-01 primary adaptation target (different schema); full-DOB identifiability contrast | No license file → research-use only, no redistribution; answer key absent → within-lab labels only |
 | **Ohio voter file** (full DOB, statewide key) | Full-DOB collision calibration (SCL-04); the ADP-02 NC↔OH linkage arm | User-side download. Florida: explicitly out (request lead time, no core dependency) |
-| **pseudopeople** (10k sample bundled; 1M/330M IHME-gated) | Noise-channel audit in NSE-02; large populations only if access granted (§10 decision) | Column noise independent of attributes — structurally cannot express group-correlated exposure; used accordingly |
+| **pseudopeople** (10k sample bundled; 1M/330M IHME-gated) | Noise-channel audit in NSE-02 via the bundled 10k sample; the gated 1M/330M populations are deferred as optional-later (sign-off decision — nothing depends on them) | Column noise independent of attributes — structurally cannot express group-correlated exposure; used accordingly |
 | **splink_datasets** (`fake_1000`, `historical_50k`) | Notebook-00 quickstart corpus; CI fixtures | Fetchable live from the build sandbox |
 | **Nickname lexicons** (carltonnorthern, diminutives.db) | TRN-06 supervision; battery probes | English-centric with documented provenance bias — limitation carried on every affected claim |
 
@@ -219,13 +224,12 @@ in CI); cross-backend reproducibility policy with stated per-metric tolerances (
 
 ## 8. Compute estimates (planning numbers, ±2×; re-measured by `smoke_check`)
 
-| Tier / platform | What runs | Estimate |
+| Tier / machine | What runs | Estimate |
 |---|---|---|
-| Smoke — 4-CPU/15GB container | Whole series at 1e5–1e6; NC 2–3 snapshots processed serially with intermediate deletion | Full pass ≤ ~6–8 h; char-model runs 30–90 min |
-| Apple Silicon (32–64GB, MPS) | Mid-tier matrices; 1e7 encode ~1–1.5 h; HNSW@1e7 fits in RAM | Pruned matrices ≈ a long weekend |
-| Single CUDA GPU (4090/A100) | Definitive mid+target runs; 20–60 min per fine-tune; 1e7 encode 7–15 min | Pre-pruning matrix total ~130–170 GPU-h → MET-04 prunes to fit |
-| Multi-GPU (opt-in, 4–8×A100) | Convenience only, never a dependency | Wall-clock ÷ ~3.5; sharded 1e7 encode in minutes |
-| Analytical | SCL-03/04, EVT fits, power tables | CPU, minutes — fully live at smoke |
+| `smoke` — 4-CPU/15GB container | Whole series at 1e5–1e6; NC 2–3 snapshots processed serially with intermediate deletion | Full pass ≤ ~6–8 h; char-model runs 30–90 min |
+| `mac` — M2 Max, 96GB unified (MPS) | Everything that fits, per the mac-first policy: all single-configuration mid runs, probes/battery, CAL-01, CLU-01, index builds at 1e7 (HNSW 1e7×384d well within 96GB), scaling-ladder inference to 1e7 (~1–1.5 h), EVT fits, exploratory arms, single-seed factorial previews | MiniLM-class fine-tune ~1–3 h/run; MPS ≈ 0.2–0.3× A100, so full multi-seed factorials are possible but slow — previews here, definitive matrices on the node |
+| `node` — 4×A100 80GB, 900GB RAM, 90 cores (**the hard ceiling**) | Definitive multi-seed training factorials (TRN-01..06 + cross-pressure), BAS-02 matched-compute frontier at 1e7, FAIR-01 and SCL-01 definitive runs, optional 1e8 embed stretch | Factorials ~1–2 days wall via accelerate sweeps (~130–170 A100-h pre-pruning; MET-04 prunes); 1e7 encode in minutes sharded; nothing in the lab may require more than this one node |
+| `analytical` | SCL-03/04, EVT extrapolations, power tables | CPU, minutes — fully live at smoke |
 
 1e9 anchors for SCL-03 (labeled projections): 1e9 × 384-d vectors = 1.5 TB fp32 / 384 GB int8 /
 48 GB binary — why EFF-01 is decisive; encode ≈ 14 GPU-h per model at 20k rec/s/GPU.
@@ -265,10 +269,12 @@ Approving this plan locks:
 3. Data commitments: NC (audit + gated truth arms), own generator, BPID (user downloads), ONC
    (adaptation), Ohio (user downloads; SCL-04 + ADP-02). Florida out.
 4. Adjudication: user labels ~200–500 stratified pairs via the shipped widget at target tier.
-5. **Open decision to make at sign-off:** file the pseudopeople IHME data-access request now
-   (unlocks a 330M-simulant extrapolation cross-check later; no core dependency) — yes or no?
-6. Any re-scoping of target hardware (current assumption: all three platforms supported equally,
-   definitive runs sized for one good GPU).
+5. ~~Open decision~~ **Resolved at sign-off:** the pseudopeople IHME data-access request is
+   deferred — optional-later, along with anything else requiring a data-access request; the lab
+   depends on none of it (bundled 10k sample only, for NSE-02).
+6. ~~Open~~ **Resolved at sign-off:** hardware pinned — `mac` = M2 Max 96GB (primary, mac-first),
+   `node` = one 4×A100 80GB machine (900GB RAM, 90 cores), the hard ceiling nothing may exceed;
+   1e8–1e9 stay analytical.
 
 **Changing any locked item after Stage B starts** triggers a re-plan of the affected arms only, with
 the change and its cost recorded in PLAN.md's changelog.
@@ -286,7 +292,6 @@ the change and its cost recorded in PLAN.md's changelog.
 
 ## Open questions (tracked, non-blocking)
 
-- pseudopeople IHME request: decide at sign-off (§10.5).
 - NC demographic-field consistency across 20 years of snapshot layouts — verified empirically in
   notebooks 01/04; stratification power depends on it.
 - Written governance check on redistributing NC-derived aggregate statistics before any such artifact
