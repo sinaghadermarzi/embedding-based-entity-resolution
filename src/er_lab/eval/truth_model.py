@@ -30,6 +30,11 @@ __all__ = ["corrected_precision_recall", "disagreement_sample"]
 #: a real label, so one-sided pairs always count as disagreements).
 _ABSENT = "__absent__"
 
+#: Sentinel a missing stratum value maps to for GROUPING only (pandas group
+#: enumeration with dropna=False raises on null single-column categories, and
+#: null keys must not silently vanish); the output keeps the original <NA>.
+_NA_STRATUM = "__stratum_na__"
+
 
 def _clip01(x: float) -> float:
     return float(min(1.0, max(0.0, x)))
@@ -57,6 +62,11 @@ def _check_ci(name: str, ci: tuple[float, float] | None, point: float) -> tuple[
     lo, hi = (_check_rate(f"{name}[0]", ci[0]), _check_rate(f"{name}[1]", ci[1]))
     if lo > hi:
         raise ValueError(f"{name} must satisfy low <= high, got {ci!r}")
+    if not lo <= point <= hi:
+        # bands are evaluated at the CI corners only, so a point rate outside
+        # its own CI would yield a "conservative" band excluding the point
+        # estimate — self-contradictory output; refuse the inconsistent input
+        raise ValueError(f"{name}={ci!r} must contain the point rate {point!r}")
     return (lo, hi)
 
 
@@ -234,7 +244,9 @@ def disagreement_sample(
 
     ``strata`` names columns to stratify on, taken from either frame (values from
     ``pairs_a`` win where both carry the column); rows without a stratum value
-    form their own ``<NA>`` stratum. Allocation over strata: every nonempty
+    form their own ``<NA>`` stratum (reported as missing in the output — e.g.
+    pairs present only in a frame that lacks the stratum column). Stratum
+    identity is decided on the string representation of the values. Allocation over strata: every nonempty
     stratum gets at least one draw when ``n`` allows (``n >= #strata``), the rest
     is proportional to stratum size with largest-remainder rounding, capped at
     stratum size. Sampling is without replacement, deterministic under ``seed``.
@@ -269,7 +281,19 @@ def disagreement_sample(
         return pd.DataFrame(columns=out_columns)
 
     if strata:
-        groups = list(population.groupby(strata, dropna=False, sort=True))
+        # Group on all-string shadow keys: pandas raises on a single-column
+        # grouper with null categories ("Categorical categories cannot be
+        # null"), and mixed-type sort would be fragile. Missing values map to
+        # the _NA_STRATUM sentinel — their own stratum, per the docstring —
+        # while the original columns (real <NA> included) flow to the output.
+        population = population.copy()
+        gcols = []
+        for k, col in enumerate(strata):
+            s = population[col]
+            gcol = f"__group_{k}"
+            population[gcol] = np.where(s.isna(), _NA_STRATUM, s.astype(str))
+            gcols.append(gcol)
+        groups = list(population.groupby(gcols, sort=True))
     else:
         groups = [((), population)]
     alloc = _allocate(np.array([len(g) for _, g in groups]), n)

@@ -72,7 +72,7 @@ def entity_ladder(
     cum = np.cumsum([int(counts[e]) for e in order])
 
     out: dict[int, pd.DataFrame] = {}
-    for size in sorted(set(int(s) for s in sizes)):
+    for size in sorted({int(s) for s in sizes}):
         stop = int(np.searchsorted(cum, size, side="left"))  # first prefix reaching size
         keep = set(order[: stop + 1])
         out[size] = df[ent.isin(keep)].copy()

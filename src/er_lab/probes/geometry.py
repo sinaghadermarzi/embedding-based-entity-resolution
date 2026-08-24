@@ -111,7 +111,11 @@ def hubness(X: np.ndarray, k: int = 10) -> dict[str, float]:
     Positive skew means hub records exist — rows that appear in many neighbor
     lists (mean N_k is always exactly k, so a heavy right tail is the signature);
     for i.i.d. low-dimensional data skew is mild, and it grows with intrinsic
-    dimensionality and with planted hub geometry. Exact brute-force (sklearn
+    dimensionality and with planted hub geometry. A constant N_k distribution
+    (every row equally k-occurring — e.g. a corpus made of same-size groups of
+    exact-duplicate serializations) carries no hubness signal, so its skewness
+    is reported as 0.0 by definition (scipy's sample skewness would emit a
+    precision-loss warning and return NaN there). Exact brute-force (sklearn
     NearestNeighbors, algorithm='brute'): allowed only up to
     ``HUBNESS_MAX_ROWS`` (20k) rows, raises above — use a sampled subset at scale.
     """
@@ -138,4 +142,10 @@ def hubness(X: np.ndarray, k: int = 10) -> dict[str, float]:
             kept += 1
             if kept == k:
                 break
-    return {"skewness": float(skew(counts)), "max_k_occurrence": int(counts.max())}
+    if np.ptp(counts) == 0:
+        # constant N_k: the most hub-free outcome possible — report 0 skew
+        # instead of scipy's NaN-with-catastrophic-cancellation-warning
+        skewness = 0.0
+    else:
+        skewness = float(skew(counts))
+    return {"skewness": skewness, "max_k_occurrence": int(counts.max())}

@@ -82,9 +82,7 @@ def variance_components(
         fitted = fitted + means.loc[df[f]].to_numpy() - grand
         df_resid -= len(means) - 1
     if df_resid <= 0:
-        raise ValueError(
-            f"not enough runs for a residual estimate: N={n}, residual df={df_resid}"
-        )
+        raise ValueError(f"not enough runs for a residual estimate: N={n}, residual df={df_resid}")
     resid = y - fitted
     var_resid = float((resid**2).sum() / df_resid)
 
@@ -151,15 +149,24 @@ def power_table(
     power: float = 0.8,
     two_sided: bool = True,
     n_levels: tuple[int, ...] = (3, 5, 10),
+    seed_key: str = "seed",
+    noise_key: str = "noise_draw",
 ) -> pd.DataFrame:
     """The MET-04 power table: seeds needed and achieved power per delta.
 
     ``var_components`` is the dict from :func:`variance_components`; the
-    replicate variance is var_components['seed'] + var_components['noise_draw']
-    (a missing key counts as 0 — e.g. a pilot without a split factor; NaN
-    components are rejected, re-run the pilot with >= 2 levels). One row per
-    delta: ``seeds_needed`` at (alpha, power), plus ``power_at_{n}`` for each
-    n in ``n_levels`` — the achieved power of the two-sided z-test,
+    replicate variance is ``var_components[seed_key] +
+    var_components[noise_key]`` (defaults ``'seed'`` / ``'noise_draw'`` —
+    pass ``seed_key``/``noise_key`` when the pilot's factor columns were
+    named differently). ONE missing key counts as 0 — e.g. a pilot without a
+    noise factor — but when BOTH keys are absent while other non-residual
+    components exist, the call raises: that pattern is a factor-naming
+    mismatch, and silently planning with sigma = 0 would output
+    ``seeds_needed = 2`` and power 1.0 for every delta — the exact
+    under-replication MET-04 exists to prevent. NaN components are rejected;
+    re-run the pilot with >= 2 levels. One row per delta: ``seeds_needed``
+    at (alpha, power), plus ``power_at_{n}`` for each n in ``n_levels`` —
+    the achieved power of the two-sided z-test,
 
         power(n) = Phi(delta·sqrt(n)/sigma − z_{1−alpha/2})
                  + Phi(−delta·sqrt(n)/sigma − z_{1−alpha/2}),
@@ -169,9 +176,19 @@ def power_table(
     detectable delta needs more seeds than the budget affords is fractionated
     or cut by the pre-registered rule, never quietly under-replicated.
     """
-    var_seed = var_components.get("seed", 0.0)
-    var_noise = var_components.get("noise_draw", 0.0)
-    for name, v in (("seed", var_seed), ("noise_draw", var_noise)):
+    if seed_key not in var_components and noise_key not in var_components:
+        others = sorted(k for k in var_components if k != "residual")
+        if others:
+            raise ValueError(
+                f"var_components has neither {seed_key!r} nor {noise_key!r} but does "
+                f"contain {others} — this looks like a factor-naming mismatch, and "
+                "treating both as 0 would plan with sigma = 0 (seeds_needed = 2, "
+                "power 1.0 at every delta); pass seed_key/noise_key naming your "
+                "pilot's factor columns"
+            )
+    var_seed = var_components.get(seed_key, 0.0)
+    var_noise = var_components.get(noise_key, 0.0)
+    for name, v in ((seed_key, var_seed), (noise_key, var_noise)):
         if not np.isfinite(v) or v < 0:
             raise ValueError(f"var_components[{name!r}] must be finite and >= 0, got {v}")
     sigma = float(np.sqrt(var_seed + var_noise))

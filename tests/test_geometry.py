@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 import pytest
 
@@ -119,6 +121,21 @@ def test_hubness_counts_are_conserved():
     assert set(out) == {"skewness", "max_k_occurrence"}
     # every row contributes exactly k occurrences, so max >= mean = k
     assert out["max_k_occurrence"] >= 5
+
+
+def test_hubness_constant_counts_is_zero_skew_without_warning():
+    # a corpus of same-size exact-duplicate groups: with k=2 every row's two
+    # nearest neighbors are its duplicates, so N_k == 2 for all rows — the
+    # most hub-free outcome possible must be skewness 0.0, not scipy's
+    # NaN plus a catastrophic-cancellation RuntimeWarning
+    rng = np.random.default_rng(0)
+    base = rng.standard_normal((5, 8))
+    x = np.tile(base, (3, 1))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any scipy precision-loss warning fails
+        out = hubness(x, k=2)
+    assert out["skewness"] == 0.0
+    assert out["max_k_occurrence"] == 2
 
 
 def test_hubness_validation():

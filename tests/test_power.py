@@ -107,8 +107,28 @@ def test_power_table_known_answers_and_monotonicity() -> None:
     #   Phi(sqrt(8) - 1.95996) + Phi(-sqrt(8) - 1.95996) = 0.80736...
     assert table.loc[1, "power_at_8"] == approx(0.80736, abs=1e-4)
     assert (table["power_at_8"].to_numpy() >= table["power_at_3"].to_numpy() - 1e-12).all()
-    # missing keys count as zero variance; NaN components are rejected
+    # a single missing key counts as zero variance (pilot without that factor);
+    # residual-only pilots are allowed too; NaN components are rejected
     zero = power_table([0.01], {"residual": 1.0})
     assert zero["seeds_needed"].iloc[0] == 2 and zero["power_at_3"].iloc[0] == 1.0
+    seed_only = power_table([0.01], {"seed": 1e-4, "residual": 1e-3})
+    assert seed_only["sd_replicate"].iloc[0] == approx(0.01)
     with pytest.raises(ValueError, match="var_components"):
         power_table([0.01], {"seed": float("nan"), "noise_draw": 0.0})
+
+
+def test_power_table_rejects_factor_naming_mismatch() -> None:
+    # a pilot whose factor columns were named differently must NOT silently
+    # plan with sigma = 0 (seeds_needed = 2, power 1.0 at every delta)
+    with pytest.raises(ValueError, match="naming mismatch"):
+        power_table([0.01, 0.001], {"training_seed": 0.01, "noise": 0.02, "residual": 0.001})
+
+
+def test_power_table_explicit_factor_keys() -> None:
+    vc_default = {"seed": 5e-5, "noise_draw": 5e-5, "residual": 1e-3}
+    vc_renamed = {"training_seed": 5e-5, "noise": 5e-5, "residual": 1e-3}
+    table_default = power_table([0.005, 0.01], vc_default)
+    table_renamed = power_table(
+        [0.005, 0.01], vc_renamed, seed_key="training_seed", noise_key="noise"
+    )
+    pd.testing.assert_frame_equal(table_default, table_renamed)

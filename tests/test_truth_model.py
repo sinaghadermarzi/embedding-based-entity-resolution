@@ -12,9 +12,7 @@ from er_lab.eval.truth_model import corrected_precision_recall, disagreement_sam
 
 
 def test_zero_rates_are_identity():
-    out = corrected_precision_recall(
-        0.93, 0.81, truth_dup_rate=0.0, truth_overlay_rate=0.0
-    )
+    out = corrected_precision_recall(0.93, 0.81, truth_dup_rate=0.0, truth_overlay_rate=0.0)
     assert out["precision"] == pytest.approx(0.93)
     assert out["recall"] == pytest.approx(0.81)
     # with exact rates and no CI, the bands collapse onto the points
@@ -31,9 +29,7 @@ def test_two_percent_duplication_known_answer():
     #   P = (P_obs - o) / (1 - d - o) = (0.98 - 0) / (1 - 0.02) = 0.98 / 0.98 = 1.0
     # i.e. the 2% of predicted links scored as FPs are exactly the true links that
     # duplicated keys made LOOK like FPs — the system was actually perfect.
-    out = corrected_precision_recall(
-        0.98, 0.90, truth_dup_rate=0.02, truth_overlay_rate=0.0
-    )
+    out = corrected_precision_recall(0.98, 0.90, truth_dup_rate=0.02, truth_overlay_rate=0.0)
     assert out["precision"] == pytest.approx(1.0)
     # recall's point estimate is untouched by dup alone (o = 0): R = 0.90 / 1 = 0.90
     assert out["recall"] == pytest.approx(0.90)
@@ -41,15 +37,11 @@ def test_two_percent_duplication_known_answer():
 
 def test_general_known_answers():
     # P = (0.90 - 0) / (1 - 0.02) = 0.90 / 0.98
-    out = corrected_precision_recall(
-        0.90, 0.80, truth_dup_rate=0.02, truth_overlay_rate=0.0
-    )
+    out = corrected_precision_recall(0.90, 0.80, truth_dup_rate=0.02, truth_overlay_rate=0.0)
     assert out["precision"] == pytest.approx(0.90 / 0.98)
 
     # overlays inflate observed precision: P = (0.98 - 0.03) / (1 - 0.03) = 0.95/0.97
-    out = corrected_precision_recall(
-        0.98, 0.80, truth_dup_rate=0.0, truth_overlay_rate=0.03
-    )
+    out = corrected_precision_recall(0.98, 0.80, truth_dup_rate=0.0, truth_overlay_rate=0.03)
     assert out["precision"] == pytest.approx(0.95 / 0.97)
     # overlays deflate observed recall (spurious truth pairs): R = 0.80 / 0.97
     assert out["recall"] == pytest.approx(0.80 / 0.97)
@@ -58,9 +50,7 @@ def test_general_known_answers():
     assert out["recall_high"] == pytest.approx(0.80 / 0.97)
 
     # dup widens the recall band by d on the high side: high = 0.9*0.8 + 0.1
-    out = corrected_precision_recall(
-        0.98, 0.80, truth_dup_rate=0.1, truth_overlay_rate=0.0
-    )
+    out = corrected_precision_recall(0.98, 0.80, truth_dup_rate=0.1, truth_overlay_rate=0.0)
     assert out["recall_low"] == pytest.approx(0.9 * 0.8)
     assert out["recall_high"] == pytest.approx(0.9 * 0.8 + 0.1)
 
@@ -97,9 +87,7 @@ def test_bands_widen_with_ci_inputs():
 
 def test_point_clipping_to_unit_interval():
     # observed precision below the overlay rate would invert negative: clipped to 0
-    out = corrected_precision_recall(
-        0.01, 0.99, truth_dup_rate=0.0, truth_overlay_rate=0.05
-    )
+    out = corrected_precision_recall(0.01, 0.99, truth_dup_rate=0.0, truth_overlay_rate=0.05)
     assert out["precision"] == 0.0
     # recall inflating past 1 is clipped
     assert out["recall"] == 1.0
@@ -129,6 +117,24 @@ def test_validation_errors():
         corrected_precision_recall(
             0.9, 0.9, truth_dup_rate=0.1, truth_overlay_rate=0.0, dup_rate_ci=(0.2, 0.1)
         )
+
+
+def test_ci_must_contain_point_rate():
+    # a CI that excludes its own point rate would yield a "conservative" band
+    # excluding the point estimate (corners-only evaluation): reject the input
+    with pytest.raises(ValueError, match="must contain the point rate"):
+        corrected_precision_recall(
+            0.95, 0.85, truth_dup_rate=0.2, truth_overlay_rate=0.0, dup_rate_ci=(0.01, 0.02)
+        )
+    with pytest.raises(ValueError, match="must contain the point rate"):
+        corrected_precision_recall(
+            0.95, 0.85, truth_dup_rate=0.0, truth_overlay_rate=0.05, overlay_rate_ci=(0.06, 0.1)
+        )
+    # boundary containment is fine
+    out = corrected_precision_recall(
+        0.95, 0.85, truth_dup_rate=0.05, truth_overlay_rate=0.0, dup_rate_ci=(0.05, 0.08)
+    )
+    assert out["precision_low"] <= out["precision"] <= out["precision_high"]
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +244,35 @@ def test_disagreement_sample_unstratified_and_edge_cases():
     dup = pd.concat([pairs_a, pairs_a.iloc[[0]]], ignore_index=True)
     with pytest.raises(ValueError, match="duplicate unordered"):
         disagreement_sample(dup, pairs_b, n=2, seed=0)
+
+
+def test_disagreement_sample_b_only_pairs_with_missing_stratum():
+    # the docstring's headline case: pairs present only in the frame that
+    # LACKS the stratum column have no stratum value — they must form their
+    # own <NA> stratum instead of crashing pandas' null-category group
+    # enumeration ("Categorical categories cannot be null")
+    rows_a = [(f"r{i}", f"s{i}", 1, "X" if i < 4 else "Y") for i in range(7)]
+    pairs_a = pd.DataFrame(rows_a, columns=["a", "b", "label", "county"])
+    rows_b = [(f"r{i}", f"s{i}", 0) for i in range(7)]  # all 7 shared disagree
+    rows_b += [(f"u{i}", f"v{i}", 1) for i in range(3)]  # b-only: no county anywhere
+    pairs_b = pd.DataFrame(rows_b, columns=["a", "b", "label"])
+
+    # full population: 10 disagreements in strata {X: 4, Y: 3, <NA>: 3}
+    out = disagreement_sample(pairs_a, pairs_b, strata=["county"], n=100, seed=0)
+    assert len(out) == 10
+    b_only = out[out["a"].str.startswith("u")]
+    assert len(b_only) == 3
+    assert b_only["county"].isna().all()  # <NA> restored in the output
+    assert b_only["label_a"].isna().all()
+    assert out["weight"].sum() == pytest.approx(10.0)
+
+    # subsample: the <NA> stratum is a stratum like any other (min-1 + N_h/n_h)
+    out2 = disagreement_sample(pairs_a, pairs_b, strata=["county"], n=6, seed=1)
+    assert len(out2) == 6
+    na_grp = out2[out2["county"].isna()]
+    assert len(na_grp) >= 1
+    assert na_grp["weight"].unique() == pytest.approx([3.0 / len(na_grp)])
+    assert out2["weight"].sum() == pytest.approx(10.0)
 
 
 def test_disagreement_sample_unordered_pair_matching():
