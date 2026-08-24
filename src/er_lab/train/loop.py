@@ -20,12 +20,12 @@ How the factors combine per step:
    improves). FN-contamination is measured on the raw mined table
    (:func:`fn_contamination`) *before* 'ann_filtered' applies
    :func:`cluster_aware_filter` — the measurement sees the trap, the filter is
-   the mitigation. The filter proxy here is the corpus ``entity_id`` (synthetic
-   corpora), i.e. the oracle-filter arm; notebook arms substitute learned
-   proxies.
+   the mitigation. The filter proxy defaults to the corpus ``entity_id``
+   (synthetic corpora), i.e. the oracle-filter arm; pass ``filter_proxy`` to
+   run a deployable (non-truth) proxy arm instead.
 3. Both sides of each pair are augmented (:func:`make_augmenter`), serialized
-   (``er_lab.serialize``, scheme/missing from the ``serialize.scheme`` /
-   ``serialize.missing`` cfg extension keys), and embedded differentiably.
+   (``er_lab.serialize``, scheme/missing from the typed ``serialize.scheme`` /
+   ``serialize.missing`` cfg keys), and embedded differentiably.
 4. Losses needing explicit negatives (triplet, cosent) draw one mined negative
    per anchor (falling back to the next pair's b-side in-batch — which can
    itself be a false negative in a dedup-dense batch; that is the measured
@@ -37,10 +37,14 @@ exists so schedule-carrying variants keep the same history schema.
 
 Multi-GPU (``cfg.infra.multi_gpu=true``): single-node data parallelism via
 ``accelerate``, installed through the optional ``multi-gpu`` extra
-(``uv sync --extra multi-gpu``). accelerate is NOT installed in the smoke
-container, so this branch is UNIT-UNTESTED here — it is exercised on the node
-(4xA100, one machine). There is deliberately no multi-machine assumption
-anywhere: nothing in the lab may require more than the single node (PLAN §2).
+(``uv sync --extra multi-gpu``; also in the dev group so the DDP path is
+CI-tested 2-process on CPU — ``accelerate launch`` supports multi-process
+CPU). Under DDP, gradient synchronization only runs through the wrapper's
+``forward``, so the loop tokenizes OUTSIDE the model and calls the wrapped
+module itself for training embeddings, and uses ``accelerator.unwrap_model``
+for the no-grad ``encode()`` during re-mining. There is deliberately no
+multi-machine assumption anywhere: nothing in the lab may require more than
+the single node (PLAN §2).
 """
 
 from __future__ import annotations
@@ -74,9 +78,8 @@ HISTORY_COLUMNS = ["step", "loss", "fn_contamination_rate", "lr"]
 def _compute_setup(cfg: DictConfig):
     """Resolve (accelerator, device, dtype) honoring the multi-GPU opt-in.
 
-    The accelerate branch is unit-untested in the smoke container (optional
-    'multi-gpu' extra not installed) — see the module docstring. Single-node
-    only: a bare ``Accelerator()`` spans at most this machine's GPUs.
+    Single-node only: a launched ``Accelerator()`` spans at most this
+    machine's processes (multi-GPU on the node, multi-process CPU in CI).
     """
     if bool(cfg.infra.get("multi_gpu", False)):
         try:
@@ -86,8 +89,10 @@ def _compute_setup(cfg: DictConfig):
                 "infra.multi_gpu=true requires accelerate — install the optional "
                 "extra: uv sync --extra multi-gpu"
             ) from exc
-        dtype_probe = resolve_precision(cfg, torch.device("cuda"))
-        mixed = {torch.float16: "fp16", torch.bfloat16: "bf16"}.get(dtype_probe, "no")
+        mixed = "no"
+        if torch.cuda.is_available():  # CUDA-less accelerate (CPU DDP) stays fp32
+            dtype_probe = resolve_precision(cfg, torch.device("cuda"))
+            mixed = {torch.float16: "fp16", torch.bfloat16: "bf16"}.get(dtype_probe, "no")
         accelerator = Accelerator(mixed_precision=mixed)
         # accelerate owns precision handling; report its device, keep fp32 locally
         return accelerator, accelerator.device, torch.float32
@@ -105,6 +110,7 @@ def train_encoder(
     augment_kind: str,
     steps: int,
     eval_every: int = 0,
+    filter_proxy: pd.Series | None = None,
     seed: int,
 ):
     """Train ``encoder`` on ``corpus_df`` for exactly ``steps`` optimizer steps.
@@ -115,11 +121,17 @@ def train_encoder(
     'inbatch' or truthless corpora), and ``lr``. Deterministic under ``seed``:
     same encoder init + same arguments => identical final weights.
 
-    cfg keys read: ``train.batch_size``, ``train.lr``, and optional extension
-    keys ``train.temperature`` (default 0.05), ``train.margin`` (0.2),
-    ``train.mine_k`` (5), ``train.channel_rates`` (calibrated augmentation),
-    ``serialize.scheme``/``serialize.missing`` (default colval/token), plus the
-    ``infra`` block via ``er_lab.infra.device``.
+    ``filter_proxy`` (record_id -> proxy cluster id) is what the
+    'ann_filtered' miner hands to :func:`cluster_aware_filter`; the default
+    ``None`` uses the corpus ``entity_id`` truth — the documented oracle
+    upper-bound arm. Pass a deployable proxy (e.g. a phonetic key or a prior
+    model's clustering) for the non-oracle mitigation arms.
+
+    cfg keys read: the typed ``train.batch_size``, ``train.lr``,
+    ``train.temperature``, ``train.margin``, ``train.miner_k``,
+    ``serialize.scheme``/``serialize.missing``, the optional extension key
+    ``train.channel_rates`` (calibrated augmentation), plus the ``infra``
+    block via ``er_lab.infra.device``.
     """
     if steps < 1:
         raise ValueError(f"steps must be >= 1, got {steps}")
@@ -135,11 +147,11 @@ def train_encoder(
     accelerator, device, dtype = _compute_setup(cfg)
     batch = int(cfg.train.batch_size)
     lr = float(cfg.train.lr)
-    temperature = float(cfg.train.get("temperature", 0.05))
-    margin = float(cfg.train.get("margin", 0.2))
-    mine_k = int(cfg.train.get("mine_k", 5))
-    scheme = OmegaConf.select(cfg, "serialize.scheme", default="colval")
-    missing = OmegaConf.select(cfg, "serialize.missing", default="token")
+    temperature = float(cfg.train.temperature)
+    margin = float(cfg.train.margin)
+    mine_k = int(cfg.train.miner_k)
+    scheme = str(cfg.serialize.scheme)
+    missing = str(cfg.serialize.missing)
 
     text_roles = [c for c in corpus_df.columns if c in ROLES and c not in NON_TEXT_ROLES]
     if not text_roles:
@@ -162,6 +174,10 @@ def train_encoder(
 
     encoder.to(device)
 
+    def _unwrapped():
+        """The bare module — under accelerate, the DDP wrapper hides custom methods."""
+        return encoder if accelerator is None else accelerator.unwrap_model(encoder)
+
     def _mine() -> tuple[dict[str, list[str]] | None, float]:
         """(neighbors by anchor_id, raw contamination); (None, NaN) for inbatch."""
         if miner_name == "inbatch":
@@ -169,11 +185,11 @@ def train_encoder(
         if miner_name == "bm25":
             mined = bm25_hard_negatives(corpus_df, _texts(corpus_df), k=mine_k, seed=seed)
         else:  # ann / ann_filtered: mine with the encoder's current embeddings
-            emb = encoder.encode(_texts(corpus_df), batch_size=batch, device=device)
+            emb = _unwrapped().encode(_texts(corpus_df), batch_size=batch, device=device)
             mined = ann_hard_negatives(corpus_df, emb, k=mine_k, seed=seed)
         rate = fn_contamination(mined, truth)  # measured BEFORE any mitigation
         if miner_name == "ann_filtered":
-            mined = cluster_aware_filter(mined, truth)
+            mined = cluster_aware_filter(mined, truth if filter_proxy is None else filter_proxy)
         neighbors = mined.groupby("anchor_id", sort=False)["neg_id"].apply(list).to_dict()
         return {str(k): [str(v) for v in vs] for k, vs in neighbors.items()}, rate
 
@@ -205,7 +221,13 @@ def train_encoder(
 
     def _embed(ids: list[str]) -> torch.Tensor:
         frame = augmenter(recs.loc[ids].reset_index(drop=True))
-        return encoder.embed_batch(_texts(frame), device=device)
+        texts = _texts(frame)
+        if accelerator is None:
+            return encoder.embed_batch(texts, device=device)
+        # DDP gradient sync only runs through the wrapper's forward(): tokenize
+        # outside (on the bare module) and call the wrapped module itself.
+        tokens = _unwrapped().tokenize(texts, device=device)
+        return encoder(*tokens) if isinstance(tokens, tuple) else encoder(tokens)
 
     optimizer = torch.optim.AdamW(encoder.parameters(), lr=lr)
     if accelerator is not None:
@@ -258,4 +280,6 @@ def train_encoder(
         history.append((step, float(loss.detach().float().cpu()), contamination, lr))
 
     encoder.eval()
-    return encoder, pd.DataFrame(history, columns=HISTORY_COLUMNS)
+    # hand back the bare module: callers use encode()/embed_batch(), which a
+    # DDP wrapper does not expose (its job — synced training — is done)
+    return _unwrapped(), pd.DataFrame(history, columns=HISTORY_COLUMNS)

@@ -109,9 +109,7 @@ def test_extrapolated_series_triggers_watermark_and_dashes(registry):
 
 
 def test_meta_level_basis_marks_whole_figure_extrapolated(registry):
-    registry.register(
-        "projection", xy_frame(), cfg=CFG, tier=TIER, meta={"basis": "EXTRAPOLATED"}
-    )
+    registry.register("projection", xy_frame(), cfg=CFG, tier=TIER, meta={"basis": "EXTRAPOLATED"})
     fig = line_with_ci(registry, tier=TIER, artifact="projection")
     assert has_watermark(fig)
     assert caption_of(fig).endswith("EXTRAPOLATED")
@@ -120,9 +118,11 @@ def test_meta_level_basis_marks_whole_figure_extrapolated(registry):
 def test_three_panel_renders_and_stamps_all_names(registry):
     registry.register("prop", xy_frame(), cfg=CFG, tier=TIER)
     geo = pd.DataFrame(
-        {"x": np.random.default_rng(0).normal(size=30),
-         "y": np.random.default_rng(1).normal(size=30),
-         "group": ["a", "b", "c"] * 10}
+        {
+            "x": np.random.default_rng(0).normal(size=30),
+            "y": np.random.default_rng(1).normal(size=30),
+            "group": ["a", "b", "c"] * 10,
+        }
     )
     registry.register("geo", geo, cfg=CFG, tier=TIER)
     registry.register("sys", xy_frame(), cfg=CFG, tier=TIER)
@@ -136,20 +136,61 @@ def test_three_panel_renders_and_stamps_all_names(registry):
     assert cap.endswith("MEASURED")
 
 
+def regime_frame(**overrides) -> pd.DataFrame:
+    base = {
+        "row": ["typo", "typo", "nick", "nick"],
+        "col": ["low", "high", "low", "high"],
+        "value": [0.1, -0.3, 0.02, 0.25],
+        "ci_excludes_zero": [True, True, False, True],
+    }
+    base.update(overrides)
+    return pd.DataFrame(base)
+
+
 def test_regime_heatmap_hatches_significant_cells(registry):
-    long = pd.DataFrame(
-        {
-            "row": ["typo", "typo", "nick", "nick"],
-            "col": ["low", "high", "low", "high"],
-            "value": [0.1, -0.3, 0.02, 0.25],
-            "ci_excludes_zero": [True, True, False, True],
-        }
-    )
-    registry.register("regime", long, cfg=CFG, tier=TIER)
+    registry.register("regime", regime_frame(), cfg=CFG, tier=TIER)
     fig = regime_heatmap(registry, tier=TIER, artifact="regime")
     hatched = [p for p in fig.axes[0].patches if p.get_hatch()]
     assert len(hatched) == 3  # exactly the ci_excludes_zero cells
     assert "regime" in caption_of(fig)
+    assert caption_of(fig).endswith("MEASURED")
+    assert not has_watermark(fig)
+
+
+def test_regime_heatmap_extrapolated_basis_rows_stamp_extrapolated(registry):
+    long = regime_frame(basis=["MEASURED", "MEASURED", "MEASURED", "EXTRAPOLATED"])
+    registry.register("regime_ex", long, cfg=CFG, tier=TIER)
+    fig = regime_heatmap(registry, tier=TIER, artifact="regime_ex")
+    assert has_watermark(fig)
+    assert caption_of(fig).endswith("EXTRAPOLATED")
+
+
+def test_regime_heatmap_all_nan_values_keep_finite_color_scale(registry):
+    long = regime_frame(value=[np.nan] * 4)
+    registry.register("regime_nan", long, cfg=CFG, tier=TIER)
+    fig = regime_heatmap(registry, tier=TIER, artifact="regime_nan")
+    vmin, vmax = fig.axes[0].images[0].get_clim()
+    assert np.isfinite(vmin) and np.isfinite(vmax)  # NaN 'or 1.0' bug: NaN is truthy
+    assert (vmin, vmax) == (-1.0, 1.0)
+
+
+def test_three_panel_geometry_basis_rows_stamp_extrapolated(registry):
+    registry.register("prop", xy_frame(), cfg=CFG, tier=TIER)
+    geo = pd.DataFrame(
+        {
+            "x": [0.0, 1.0, 2.0],
+            "y": [0.0, 1.0, 2.0],
+            "basis": ["MEASURED", "MEASURED", "EXTRAPOLATED"],
+        }
+    )
+    registry.register("geo", geo, cfg=CFG, tier=TIER)
+    registry.register("sys", xy_frame(), cfg=CFG, tier=TIER)
+    fig = three_panel_pressure(
+        registry, tier=TIER, property_shift="prop", geometry="geo", system_metric="sys"
+    )
+    # the geometry frame has no dashed-line vocabulary — only the flag can tell
+    assert has_watermark(fig)
+    assert caption_of(fig).endswith("EXTRAPOLATED")
 
 
 def test_figures_never_accept_raw_dataframes(registry):
@@ -205,6 +246,50 @@ def test_conjecture_card_any_changed_field_raises(registry, field):
 def test_conjecture_card_field_validation(registry):
     with pytest.raises(ValueError, match="non-empty"):
         conjecture_card(**dict(CARD, prediction=""), registry=registry)
+
+
+def test_card_tamper_by_direct_register_is_detected(registry):
+    """A second, divergent run of card_<id> — even a self-consistent one with a
+    correct hash and kind='card' — is the tamper event: the registry is
+    append-only, so 'editing' can only mean shadowing with a newer run."""
+    from er_lab.reporting.cards import CARD_FIELDS, _content_hash
+
+    conjecture_card(**CARD, registry=registry)
+    tampered = dict(CARD, prediction="none > calibrated (rewritten after the runs)")
+    fields = {f: tampered[f] for f in CARD_FIELDS}
+    registry.register(
+        "card_TRN03_aug",
+        {**fields, "sha256": _content_hash(fields)},
+        cfg=CFG,
+        tier="analytical",
+        kind="card",
+    )
+    with pytest.raises(CardImmutableError, match="disagree"):
+        verdict_box("TRN03_aug", "CONFIRMED", "evidence", registry)
+    with pytest.raises(CardImmutableError, match="disagree"):
+        conjecture_card(**CARD, registry=registry)  # even the original re-render refuses
+    with pytest.raises(CardImmutableError, match="disagree"):
+        conjecture_card(**tampered, registry=registry)  # and the tampered one
+
+
+def test_card_sloppy_tamper_bogus_hash_or_kind_is_detected(registry):
+    conjecture_card(**CARD, registry=registry)
+    tampered = dict(CARD, conjecture="quietly rewritten", card_id=CARD["card_id"])
+    registry.register(
+        "card_TRN03_aug",
+        {**tampered, "sha256": "0" * 64},  # bogus hash
+        cfg=CFG,
+        tier="analytical",
+        kind="card",
+    )
+    with pytest.raises(CardImmutableError, match="sha256"):
+        verdict_box("TRN03_aug", "CONFIRMED", "evidence", registry)
+
+    registry2 = ArtifactRegistry(registry.root.parent / "artifacts2")
+    conjecture_card(**CARD, registry=registry2)
+    registry2.register("card_TRN03_aug", dict(CARD), cfg=CFG, tier="analytical", kind="table")
+    with pytest.raises(CardImmutableError, match="kind"):
+        conjecture_card(**CARD, registry=registry2)
 
 
 def test_verdict_box_validates_vocabulary_and_card_existence(registry):

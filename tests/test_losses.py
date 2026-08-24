@@ -135,6 +135,21 @@ def test_cosent_single_class_is_exactly_zero():
     assert float(cosent(a, b, torch.tensor([0, 0, 0]), tau=0.05)) == 0.0
 
 
+@pytest.mark.parametrize("labels", [[1, 1, 1], [0, 0, 0]])
+def test_cosent_single_class_backward_is_noop_not_error(labels):
+    """The zero must stay graph-connected: an all-positive minibatch in a real
+    training loop should be a harmless no-op step, not a backward() error."""
+    a, b = _fixed_pairs(n=3)
+    a = a.clone().requires_grad_(True)
+    b = b.clone().requires_grad_(True)
+    loss = cosent(a, b, torch.tensor(labels), tau=0.05)
+    assert float(loss.detach()) == 0.0
+    assert loss.requires_grad
+    loss.backward()  # used to raise 'element 0 ... does not require grad'
+    assert a.grad is not None and torch.all(a.grad == 0)
+    assert b.grad is not None and torch.all(b.grad == 0)
+
+
 def test_cosent_monotone_in_violation():
     a = torch.tensor([[1.0, 0.0], [1.0, 0.0]])
     pos_b = torch.tensor([[1.0, 0.0]])

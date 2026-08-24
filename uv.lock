@@ -486,6 +486,7 @@ umap = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "accelerate" },
     { name = "pytest" },
     { name = "ruff" },
 ]
@@ -525,6 +526,7 @@ provides-extras = ["umap", "pseudopeople", "nc-legacy", "multi-gpu"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "accelerate" },
     { name = "pytest" },
     { name = "ruff" },
 ]

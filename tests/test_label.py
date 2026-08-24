@@ -27,8 +27,11 @@ def queue(tmp_path=None, pairs=None) -> PairQueue:
     if pairs is None:
         # deliberately unsorted, mis-oriented, and with a duplicate
         pairs = pd.DataFrame(
-            {"a": ["r3", "r2", "r1", "r2"], "b": ["r4", "r1", "r2", "r1"],
-             "prob": [0.7, 0.9, 0.9, 0.9]}
+            {
+                "a": ["r3", "r2", "r1", "r2"],
+                "b": ["r4", "r1", "r2", "r1"],
+                "prob": [0.7, 0.9, 0.9, 0.9],
+            }
         )
     path = None if tmp_path is None else tmp_path / "labels.jsonl"
     return PairQueue(pairs, RECORDS, path=path)
@@ -52,6 +55,24 @@ def test_queue_items_carry_both_records_and_extras():
     assert item["record_a"]["given_name"] == "ann"
     assert item["record_b"]["given_name"] == "anne"
     assert item["prob"] == 0.9
+
+
+def test_queue_accepts_integer_record_ids(tmp_path):
+    """Non-string ids (e.g. int64 record_id) must work end to end: validation
+    and .loc lookups agree on the str-normalized id type."""
+    recs = pd.DataFrame({"record_id": [1, 2, 3], "given_name": ["ann", "anne", "bob"]})  # int64 ids
+    pairs = pd.DataFrame({"a": [2, 2], "b": [1, 3]})
+    q = PairQueue(pairs, recs, path=tmp_path / "labels.jsonl")
+    items = list(q)  # iteration used to KeyError on the first .loc
+    assert [i["pair_id"] for i in items] == ["1||2", "2||3"]
+    assert items[0]["record_a"]["given_name"] == "ann"
+    assert q.item("1", "2")["record_b"]["given_name"] == "anne"
+    q.record_label("1||2", "match", "alice")
+    assert q.pending("alice") == ["2||3"]
+    # same with the ids on the index instead of a record_id column
+    q2 = PairQueue(pairs, recs.set_index("record_id"))
+    assert [i["record_b"]["given_name"] for i in q2] == ["anne", "bob"]
+    assert recs["record_id"].dtype.kind == "i"  # caller's frame left untouched
 
 
 def test_queue_validation():

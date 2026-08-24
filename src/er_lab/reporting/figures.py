@@ -113,13 +113,23 @@ def _stamp(
         f"artifact {', '.join(names)} | cfg {','.join(hashes)} | tier {tier} | "
         f"{EXTRAPOLATED if extrapolated else MEASURED}"
     )
-    fig.text(0.01, 0.005, text, fontsize=7, color="0.35", ha="left", va="bottom",
-             gid=CAPTION_GID)
+    fig.text(0.01, 0.005, text, fontsize=7, color="0.35", ha="left", va="bottom", gid=CAPTION_GID)
 
 
 def _watermark(fig: plt.Figure) -> None:
-    fig.text(0.5, 0.5, EXTRAPOLATED, fontsize=40, color="0.4", alpha=0.18,
-             ha="center", va="center", rotation=30, zorder=5, gid=WATERMARK_GID)
+    fig.text(
+        0.5,
+        0.5,
+        EXTRAPOLATED,
+        fontsize=40,
+        color="0.4",
+        alpha=0.18,
+        ha="center",
+        va="center",
+        rotation=30,
+        zorder=5,
+        gid=WATERMARK_GID,
+    )
 
 
 def _check_columns(df: pd.DataFrame, name: str, cols: list[str]) -> None:
@@ -158,17 +168,18 @@ def _draw_series(
         (line,) = ax.plot(measured[x], measured[y], "-", label=label)
         color = line.get_color()
         if has_band:
-            ax.fill_between(measured[x], measured[lo], measured[hi], alpha=0.2,
-                            color=color, linewidth=0)
+            ax.fill_between(
+                measured[x], measured[lo], measured[hi], alpha=0.2, color=color, linewidth=0
+            )
     if len(extrap):
         seg = pd.concat([measured.tail(1), extrap]) if len(measured) else extrap
-        (line,) = ax.plot(seg[x], seg[y], "--", color=color,
-                          label=label if color is None else None)
+        (line,) = ax.plot(seg[x], seg[y], "--", color=color, label=label if color is None else None)
         color = color or line.get_color()
         if has_band:
             ax.fill_between(seg[x], seg[lo], seg[hi], alpha=0.12, color=color, linewidth=0)
-        ax.axvspan(float(extrap[x].min()), float(extrap[x].max()),
-                   color="0.85", alpha=0.4, zorder=0)
+        ax.axvspan(
+            float(extrap[x].min()), float(extrap[x].max()), color="0.85", alpha=0.4, zorder=0
+        )
     return bool(len(extrap))
 
 
@@ -211,8 +222,9 @@ def line_with_ci(
     fig, ax = plt.subplots(figsize=figsize)
     any_extrap = False
     for key, g in _groups(df, hue):
-        any_extrap |= _draw_series(ax, g, x=x, y=y, lo=lo, hi=hi, basis=basis,
-                                   meta_extrapolated=meta_ex, label=key)
+        any_extrap |= _draw_series(
+            ax, g, x=x, y=y, lo=lo, hi=hi, basis=basis, meta_extrapolated=meta_ex, label=key
+        )
     if logx:
         ax.set_xscale("log")
     if logy:
@@ -259,7 +271,8 @@ def three_panel_pressure(
 
     Column contract: *property_shift* and *system_metric* frames need
     *x*/*y* (+ optional *lo*/*hi*, *basis*); the *geometry* frame needs
-    *x*/*y* point coordinates (+ optional *group*).
+    *x*/*y* point coordinates (+ optional *group*, *basis* — an EXTRAPOLATED
+    row in ANY of the three frames marks the whole triptych EXTRAPOLATED).
     """
     df_prop, meta_prop = _load_frame(registry, property_shift, tier=tier)
     df_geo, meta_geo = _load_frame(registry, geometry, tier=tier)
@@ -271,14 +284,30 @@ def three_panel_pressure(
     names = [property_shift, geometry, system_metric]
 
     fig, axes = plt.subplots(1, 3, figsize=figsize)
-    any_extrap = _draw_series(axes[0], df_prop, x=x, y=y, lo=lo, hi=hi, basis=basis,
-                              meta_extrapolated=_meta_extrapolated(meta_prop))
+    any_extrap = _draw_series(
+        axes[0],
+        df_prop,
+        x=x,
+        y=y,
+        lo=lo,
+        hi=hi,
+        basis=basis,
+        meta_extrapolated=_meta_extrapolated(meta_prop),
+    )
     for key, g in _groups(df_geo, group if group in df_geo.columns else None):
         axes[1].scatter(g[x], g[y], s=8, alpha=0.6, label=key)
     if group in df_geo.columns:
         axes[1].legend(title=group, markerscale=1.5)
-    any_extrap |= _draw_series(axes[2], df_sys, x=x, y=y, lo=lo, hi=hi, basis=basis,
-                               meta_extrapolated=_meta_extrapolated(meta_sys))
+    any_extrap |= _draw_series(
+        axes[2],
+        df_sys,
+        x=x,
+        y=y,
+        lo=lo,
+        hi=hi,
+        basis=basis,
+        meta_extrapolated=_meta_extrapolated(meta_sys),
+    )
     for ax, panel_title in zip(axes, titles):
         ax.set_title(panel_title)
         ax.set_xlabel(x)
@@ -286,7 +315,13 @@ def three_panel_pressure(
     if suptitle:
         fig.suptitle(suptitle)
 
-    extrapolated = any_extrap or any(_meta_extrapolated(m) for m in metas)
+    extrapolated = (
+        any_extrap
+        # every loaded frame's basis rows count — including the geometry
+        # scatter, which has no dashed-line vocabulary of its own
+        or any(_frame_extrapolated(df, basis) for df in (df_prop, df_geo, df_sys))
+        or any(_meta_extrapolated(m) for m in metas)
+    )
     if extrapolated:
         _watermark(fig)
     _stamp(fig, names, metas, tier, extrapolated)
@@ -302,6 +337,7 @@ def regime_heatmap(
     col: str = "col",
     value: str = "value",
     sig: str | None = "ci_excludes_zero",
+    basis: str | None = "basis",
     cmap: str = "RdBu_r",
     title: str | None = None,
     figsize: tuple[float, float] = (6.5, 5.0),
@@ -313,18 +349,23 @@ def regime_heatmap(
     exclude zero'). Cells where *sig* is True get ``///`` hatching: hatched =
     an effect the protocol lets you believe; unhatched color = noise-level.
     Color scale is symmetric about zero (it is an effect map). Pass
-    ``sig=None`` only for exploratory maps that carry no CIs at all.
+    ``sig=None`` only for exploratory maps that carry no CIs at all. A *basis*
+    column with any EXTRAPOLATED row (or meta basis) stamps + watermarks the
+    whole map EXTRAPOLATED — a heatmap has no dashed-line vocabulary to mark
+    single cells.
     """
     df, meta = _load_frame(registry, artifact, tier=tier)
     needed = [row, col, value] + ([sig] if sig is not None else [])
     _check_columns(df, artifact, needed)
     matrix = df.pivot(index=row, columns=col, values=value).sort_index(axis=0).sort_index(axis=1)
-    vmax = float(np.nanmax(np.abs(matrix.to_numpy()))) or 1.0
+    abs_values = np.abs(matrix.to_numpy())
+    vmax = float(np.nanmax(abs_values)) if np.isfinite(abs_values).any() else float("nan")
+    if not np.isfinite(vmax) or vmax == 0:
+        vmax = 1.0
 
     fig, ax = plt.subplots(figsize=figsize)
     im = ax.imshow(matrix.to_numpy(), cmap=cmap, vmin=-vmax, vmax=vmax, aspect="auto")
-    ax.set_xticks(range(matrix.shape[1]), [str(c) for c in matrix.columns], rotation=45,
-                  ha="right")
+    ax.set_xticks(range(matrix.shape[1]), [str(c) for c in matrix.columns], rotation=45, ha="right")
     ax.set_yticks(range(matrix.shape[0]), [str(r) for r in matrix.index])
     ax.set_xlabel(col)
     ax.set_ylabel(row)
@@ -337,12 +378,19 @@ def regime_heatmap(
             for j in range(matrix.shape[1]):
                 if bool(sig_matrix.iloc[i, j]):
                     ax.add_patch(
-                        plt.Rectangle((j - 0.5, i - 0.5), 1, 1, fill=False,
-                                      hatch="///", edgecolor="0.2", linewidth=0)
+                        plt.Rectangle(
+                            (j - 0.5, i - 0.5),
+                            1,
+                            1,
+                            fill=False,
+                            hatch="///",
+                            edgecolor="0.2",
+                            linewidth=0,
+                        )
                     )
     if title:
         ax.set_title(title)
-    extrapolated = _meta_extrapolated(meta)
+    extrapolated = _meta_extrapolated(meta) or _frame_extrapolated(df, basis)
     if extrapolated:
         _watermark(fig)
     _stamp(fig, [artifact], [meta], tier, extrapolated)
@@ -379,8 +427,9 @@ def scaling_curve(
     fig, ax = plt.subplots(figsize=figsize)
     any_extrap = False
     for key, g in _groups(df, hue):
-        any_extrap |= _draw_series(ax, g, x=x, y=y, lo=lo, hi=hi, basis=basis,
-                                   meta_extrapolated=meta_ex, label=key)
+        any_extrap |= _draw_series(
+            ax, g, x=x, y=y, lo=lo, hi=hi, basis=basis, meta_extrapolated=meta_ex, label=key
+        )
     if loglog:
         ax.set_xscale("log")
         ax.set_yscale("log")

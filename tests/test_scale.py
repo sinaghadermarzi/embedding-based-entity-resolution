@@ -215,6 +215,53 @@ def test_predict_fp_count_known_answer_on_constructed_exceedances():
     assert pred["n_boot_ok"] > 0
 
 
+def test_evt_gate_fails_on_nan_diagnostics():
+    """Regression (P1): NaN diagnostics must FAIL the gate, never slip past a `<`."""
+    nan = float("nan")
+    fit = {
+        "fits": {
+            0.95: {"xi": nan, "n_exceed": 100},
+            0.99: {"xi": nan, "n_exceed": 50},
+        },
+        "diagnostics": {"qq": {0.95: {"r2": nan}, 0.99: {"r2": nan}}},
+    }
+    ok, reasons = diagnostics_pass(fit)
+    assert not ok
+    assert reasons  # NaN everywhere used to return (True, []) — a full silent pass
+    nonfinite = [r for r in reasons if "non-finite diagnostic" in r]
+    assert any("xi" in r for r in nonfinite)
+    assert any("r^2" in r for r in nonfinite)
+    # a single NaN xi among finite ones must also fail (spread becomes NaN)
+    fit["fits"][0.95]["xi"] = 0.2
+    fit["diagnostics"]["qq"][0.95]["r2"] = 0.99
+    ok, reasons = diagnostics_pass(fit)
+    assert not ok and any("non-finite" in r for r in reasons)
+
+
+def test_evt_piled_up_tail_fails_gate_via_public_path():
+    """Constant-excess pile at the top threshold: corrcoef degenerates; the QQ
+    r2 must come back ~0 (not NaN) and the gate must fail with a reason for
+    that threshold — piled-up duplicate scores are the ER pathology the gate
+    exists to catch."""
+    rng = np.random.default_rng(0)
+    scores = np.concatenate([rng.uniform(0, 1, 9950), np.full(50, 3.0)])
+    fit = fit_gpd_tail(scores)
+    ok, reasons = diagnostics_pass(fit)
+    assert not ok
+    assert any("0.995" in r for r in reasons)  # the piled threshold is named
+    for q in fit["u_quantiles"]:
+        r2 = fit["diagnostics"]["qq"][q]["r2"]
+        assert np.isfinite(r2), q  # never NaN out of _qq
+
+
+def test_evt_qq_constant_excesses_score_near_zero_not_nan():
+    from er_lab.scale.evt import _qq
+
+    d = _qq(np.full(60, 1.0), 0.2, 1.0)
+    assert np.isfinite(d["r2"])
+    assert d["r2"] < 0.01  # degenerate agreement scores as misfit
+
+
 def test_predict_fp_count_deterministic_and_validated():
     rng = np.random.default_rng(6)
     fit = fit_gpd_tail(genpareto.rvs(0.2, scale=1.0, size=20000, random_state=rng))

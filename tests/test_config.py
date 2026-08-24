@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 import torch
 from omegaconf import OmegaConf
-from omegaconf.errors import ValidationError
+from omegaconf.errors import ConfigKeyError, ValidationError
 
 from er_lab.config import (
     DEFAULT_YAML,
@@ -28,13 +28,21 @@ def test_default_load_matches_contract():
     assert cfg.model.kind == "scratch_char"
     assert cfg.model.name is None
     assert cfg.model.dim == 256
+    assert cfg.model.layers == 4
+    assert cfg.model.heads == 4
     assert cfg.model.max_len == 192
     assert cfg.train.batch_size == 64
     assert cfg.train.epochs == 2
+    assert cfg.train.steps == 200
     assert cfg.train.lr == pytest.approx(3.0e-4)
     assert cfg.train.loss == "infonce"
     assert cfg.train.miner == "inbatch"
+    assert cfg.train.miner_k == 10
     assert cfg.train.augment == "none"
+    assert cfg.train.temperature == pytest.approx(0.05)
+    assert cfg.train.margin == pytest.approx(0.2)
+    assert cfg.serialize.scheme == "colval"
+    assert cfg.serialize.missing == "token"
     assert cfg.infra.device == "auto"
     assert cfg.infra.precision == "auto"
     assert cfg.infra.num_workers == 2
@@ -91,9 +99,39 @@ def test_dotlist_extension_key_allowed():
     assert cfg.a.b == "c"
 
 
+def test_dotlist_drives_typed_model_train_serialize_knobs():
+    """The PLAN's dotlist contract: model/train/serialize knobs are typed keys."""
+    cfg = load_config(
+        dotlist=[
+            "model.layers=1",
+            "model.heads=2",
+            "train.steps=50",
+            "train.miner_k=3",
+            "train.temperature=0.1",
+            "train.margin=0.5",
+            "serialize.scheme=json",
+            "serialize.missing=drop",
+        ]
+    )
+    assert cfg.model.layers == 1 and cfg.model.heads == 2
+    assert cfg.train.steps == 50 and cfg.train.miner_k == 3
+    assert cfg.train.temperature == pytest.approx(0.1)
+    assert cfg.train.margin == pytest.approx(0.5)
+    assert cfg.serialize.scheme == "json" and cfg.serialize.missing == "drop"
+
+
 def test_typed_field_rejects_bad_value():
     with pytest.raises(ValidationError):
         load_config(dotlist=["train.batch_size=notanint"])
+
+
+def test_typed_section_rejects_typoed_key():
+    """Typo protection survives the knob additions: unknown keys under a typed
+    node still fail loudly (root-level extension keys stay allowed)."""
+    with pytest.raises(ConfigKeyError):
+        load_config(dotlist=["model.layerz=3"])
+    with pytest.raises(ConfigKeyError):
+        load_config(dotlist=["serialize.schema=colval"])
 
 
 def test_hash_deterministic_and_12_hex():

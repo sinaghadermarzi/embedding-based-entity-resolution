@@ -36,6 +36,8 @@ class ModelConfig:
     kind: str = "scratch_char"
     name: str | None = None
     dim: int = 256
+    layers: int = 4
+    heads: int = 4
     max_len: int = 192
 
 
@@ -43,10 +45,20 @@ class ModelConfig:
 class TrainConfig:
     batch_size: int = 64
     epochs: int = 2
+    steps: int = 200
     lr: float = 3.0e-4
     loss: str = "infonce"
     miner: str = "inbatch"
+    miner_k: int = 10
     augment: str = "none"
+    temperature: float = 0.05
+    margin: float = 0.2
+
+
+@dataclass
+class SerializeConfig:
+    scheme: str = "colval"  # colval | template | json | bare (er_lab.serialize.SCHEMES)
+    missing: str = "token"  # token | drop
 
 
 @dataclass
@@ -76,6 +88,7 @@ class LabConfig:
     run: RunConfig = field(default_factory=RunConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
+    serialize: SerializeConfig = field(default_factory=SerializeConfig)
     infra: InfraConfig = field(default_factory=InfraConfig)
     data: DataConfig = field(default_factory=DataConfig)
     paths: PathsConfig = field(default_factory=PathsConfig)

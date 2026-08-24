@@ -66,19 +66,19 @@ def make_corpus(n_ent: int = 100) -> pd.DataFrame:
 
 
 def tiny_cfg(batch: int = 16) -> OmegaConf:
-    cfg = load_config(
+    # every knob is a typed dotlist key — the PLAN's dotlist-driven contract
+    return load_config(
         dotlist=[
             "infra.device=cpu",
             f"train.batch_size={batch}",
             "train.lr=1e-3",
+            "train.miner_k=5",
             "model.dim=32",
             "model.max_len=96",
+            "model.layers=1",
+            "model.heads=2",
         ]
     )
-    OmegaConf.set_struct(cfg.model, False)
-    cfg.model.layers = 1
-    cfg.model.heads = 2
-    return cfg
 
 
 def run(corpus, cfg, **kw):
@@ -178,9 +178,39 @@ def test_ann_filtered_with_remine_cadence():
     assert history["fn_contamination_rate"].iloc[0] >= 0
 
 
+def test_ann_filtered_uses_supplied_non_truth_proxy(monkeypatch):
+    """The deployable-proxy arm: filter_proxy reaches cluster_aware_filter; the
+    default (None) stays the documented entity_id oracle arm."""
+    import er_lab.train.loop as loop_mod
+
+    captured: list[pd.Series] = []
+    real_filter = loop_mod.cluster_aware_filter
+
+    def spying_filter(mined, truth_proxy):
+        captured.append(truth_proxy)
+        return real_filter(mined, truth_proxy)
+
+    monkeypatch.setattr(loop_mod, "cluster_aware_filter", spying_filter)
+
+    corpus = make_corpus(30)
+    # coarse non-truth proxy: first letter of the family name (record_id -> key)
+    proxy = corpus.set_index(corpus["record_id"].astype(str))["family_name"].str[0]
+    assert proxy.nunique() < corpus["entity_id"].nunique()  # genuinely not the truth
+    run(corpus, tiny_cfg(batch=8), miner_name="ann_filtered", steps=2, filter_proxy=proxy)
+    assert len(captured) == 1
+    assert captured[0] is proxy  # the supplied proxy, not entity_id
+
+    captured.clear()
+    run(corpus, tiny_cfg(batch=8), miner_name="ann_filtered", steps=2)
+    assert (
+        captured[0] == corpus.set_index(corpus["record_id"].astype(str))["entity_id"]
+    ).all()  # oracle default
+
+
 def test_cfg_driven_serialization_scheme():
     cfg = tiny_cfg(batch=8)
-    cfg.serialize = {"scheme": "template", "missing": "drop"}
+    cfg.serialize.scheme = "template"  # typed SerializeConfig node
+    cfg.serialize.missing = "drop"
     _encoder, history = run(make_corpus(30), cfg, steps=2)
     assert len(history) == 2
 
@@ -202,7 +232,7 @@ def test_validation_errors():
 
 
 def test_multi_gpu_without_accelerate_raises_clear_error():
-    """accelerate is deliberately not installed here (optional 'multi-gpu' extra)."""
+    """The missing-extra error path (only reachable when accelerate is absent)."""
     try:
         import accelerate  # noqa: F401
 
@@ -213,6 +243,84 @@ def test_multi_gpu_without_accelerate_raises_clear_error():
     cfg.infra.multi_gpu = True
     with pytest.raises(RuntimeError, match="multi-gpu"):
         run(make_corpus(20), cfg, steps=1)
+
+
+_ACCEL_SCRIPT = """
+import sys
+
+sys.path.insert(0, {tests_dir!r})
+import numpy as np
+from accelerate.state import PartialState
+from test_train_loop import PROBE, make_corpus, tiny_cfg
+
+from er_lab.config import set_all_seeds
+from er_lab.models.encoders import build_encoder
+from er_lab.train.loop import train_encoder
+
+state = PartialState(cpu=True)  # bare PartialState does not parse ACCELERATE_USE_CPU
+assert state.num_processes == 2, f"expected 2 DDP processes, got {{state.num_processes}}"
+assert str(state.distributed_type) == "DistributedType.MULTI_CPU", state.distributed_type
+
+cfg = tiny_cfg(batch=8)
+cfg.infra.multi_gpu = True
+set_all_seeds(7)
+encoder = build_encoder(cfg)
+encoder, history = train_encoder(
+    encoder, make_corpus(30), cfg,
+    loss_name="infonce", miner_name="ann", augment_kind="none",
+    steps=3, eval_every=2, seed=7,
+)
+assert len(history) == 3
+assert np.isfinite(history["loss"]).all()
+# the returned module is unwrapped: encode() must exist and run per-process
+probe = encoder.encode([PROBE])
+np.save({out_dir!r} + f"/probe_{{state.process_index}}.npy", probe)
+"""
+
+
+@pytest.mark.slow
+def test_multi_gpu_ddp_path_two_process_cpu(tmp_path):
+    """The accelerate branch under a REAL 2-process `accelerate launch` on CPU:
+    embeddings must route through the DDP wrapper's forward (custom methods
+    like embed_batch do not exist on the wrapper and would AttributeError),
+    re-mining must unwrap for encode(), and the synced ranks must agree."""
+    import os
+    import subprocess
+    import sys
+
+    pytest.importorskip("accelerate")
+    script = tmp_path / "ddp_probe.py"
+    script.write_text(
+        _ACCEL_SCRIPT.format(tests_dir=os.path.dirname(__file__), out_dir=str(tmp_path))
+    )
+    port = 29510 + os.getpid() % 400  # avoid clashes with concurrent launches
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "accelerate.commands.launch",
+            # --multi_gpu + ACCELERATE_USE_CPU is accelerate's supported spelling
+            # of true multi-PROCESS CPU (gloo DDP); --cpu alone stays 1-process
+            "--multi_gpu",
+            "--num_processes",
+            "2",
+            "--num_machines",
+            "1",
+            "--main_process_ip",
+            "127.0.0.1",
+            "--main_process_port",
+            str(port),
+            str(script),
+        ],
+        env={**os.environ, "ACCELERATE_USE_CPU": "true"},
+        capture_output=True,
+        text=True,
+        timeout=240,
+        check=False,  # the assert below reports stdout/stderr on failure
+    )
+    assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    probes = [np.load(tmp_path / f"probe_{rank}.npy") for rank in (0, 1)]
+    assert np.allclose(probes[0], probes[1], atol=1e-6)  # DDP-synced weights agree
 
 
 # --- the augment adapter ----------------------------------------------------

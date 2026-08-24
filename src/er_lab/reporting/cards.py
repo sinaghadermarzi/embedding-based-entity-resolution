@@ -8,7 +8,11 @@ tamper-evident: the card's content is hashed and stored as an artifact
 (``card_<id>``), and re-rendering the same card with ANY field changed raises
 :class:`CardImmutableError` — cards are never edited after first render.
 Re-rendering with identical content is idempotent (the notebook can be
-re-executed freely; nothing is re-registered).
+re-executed freely; nothing is re-registered). Every card LOAD re-verifies the
+record: kind must be ``card``, the stored sha256 must match the recomputed
+content hash, and — because the registry is append-only, so 'editing' can only
+mean shadowing with a newer run — ALL completed runs of ``card_<id>`` must
+agree on content, or :class:`CardImmutableError` names the tampering.
 
 After the runs, :func:`verdict_box` closes the loop with one of the three
 allowed outcomes — ``CONFIRMED`` / ``REFUTED`` / ``UNEXPLAINED`` — and refuses
@@ -29,7 +33,12 @@ from __future__ import annotations
 import hashlib
 import json
 
-from er_lab.infra.artifacts import ArtifactMissing, ArtifactRegistry
+from er_lab.infra.artifacts import (
+    ArtifactMissing,
+    ArtifactRegistry,
+    _read_meta,
+    _read_payload,
+)
 
 __all__ = ["VERDICTS", "CardImmutableError", "conjecture_card", "verdict_box"]
 
@@ -42,7 +51,54 @@ CARD_TIER = "analytical"  # cards are tier-independent protocol artifacts
 
 
 class CardImmutableError(RuntimeError):
-    """A registered conjecture card was re-rendered with changed content."""
+    """A registered conjecture card was re-rendered with changed content — or the
+    registry's record of it shows tampering (wrong kind, hash mismatch, or two
+    completed runs of the same card disagreeing on content)."""
+
+
+def _load_card_verified(registry: ArtifactRegistry, card_id: str) -> dict | None:
+    """Load card ``card_<card_id>`` with tamper-evidence checks; None if unregistered.
+
+    The registry is append-only, so 'editing' a card can only mean registering
+    a newer run that shadows the original. Every card load therefore
+    (a) verifies each completed run has ``kind == 'card'`` and that recomputing
+    :func:`_content_hash` over its :data:`CARD_FIELDS` equals its stored
+    ``sha256``, and (b) enumerates ALL completed runs of the name and raises
+    :class:`CardImmutableError` if any two disagree on content — a second run
+    with different fields IS the tamper event. Returns the verified content.
+    """
+    name = f"card_{card_id}"
+    run_dirs = registry._runs(name)
+    if not run_dirs:
+        return None
+    contents: list[dict] = []
+    for run_dir in run_dirs:
+        meta = _read_meta(run_dir)
+        if meta.get("kind") != "card":
+            raise CardImmutableError(
+                f"conjecture card '{card_id}' has a registered run ({run_dir.name}) with "
+                f"kind={meta.get('kind')!r}, not 'card' — the card record has been tampered "
+                "with; cards are only ever written by conjecture_card (PLAN §5)"
+            )
+        payload = _read_payload(run_dir / meta["payload"])
+        fields = {f: payload.get(f) for f in CARD_FIELDS}
+        if _content_hash(fields) != payload.get("sha256"):
+            raise CardImmutableError(
+                f"conjecture card '{card_id}' fails its integrity check: run {run_dir.name} "
+                "stores a sha256 that does not match its own content — the card record has "
+                "been tampered with (PLAN §5)"
+            )
+        contents.append(fields)
+    first = contents[0]
+    for fields in contents[1:]:
+        changed = [f for f in CARD_FIELDS if fields[f] != first[f]]
+        if changed:
+            raise CardImmutableError(
+                f"conjecture card '{card_id}' has {len(contents)} registered runs that "
+                f"disagree on field(s) {changed} — cards are never edited after first "
+                "render, so a divergent later run is itself the tamper event (PLAN §5)"
+            )
+    return contents[-1]
 
 
 def conjecture_card(
@@ -81,9 +137,8 @@ def conjecture_card(
     digest = _content_hash(content)
     name = f"card_{card_id}"
 
-    existing_tier = registry.newest_tier(name)
-    if existing_tier is not None:
-        prior, _ = registry.load(name, tier=existing_tier)
+    prior = _load_card_verified(registry, card_id)
+    if prior is not None:
         changed = [f for f in CARD_FIELDS if prior.get(f) != content[f]]
         if changed:
             raise CardImmutableError(
@@ -125,14 +180,12 @@ def verdict_box(
         raise ValueError(f"unknown outcome {outcome!r}; the vocabulary is {VERDICTS} (PLAN §5)")
     if not isinstance(evidence, str) or not evidence.strip():
         raise ValueError("evidence must be a non-empty string (name the artifacts/CIs)")
-    name = f"card_{card_id}"
-    tier = registry.newest_tier(name)
-    if tier is None:
+    card = _load_card_verified(registry, card_id)
+    if card is None:
         raise ArtifactMissing(
             f"no conjecture card '{card_id}' is registered — render conjecture_card "
             "BEFORE the runs; a verdict cannot precede its conjecture"
         )
-    card, _ = registry.load(name, tier=tier)
     md = (
         f"> ### VERDICT: {outcome} — card `{card_id}`\n"
         f">\n"

@@ -49,8 +49,9 @@ class PairQueue:
     *pairs_df* needs columns ``a`` and ``b`` (record ids); extra columns (e.g.
     ``prob``, stratum tags) ride along on each item. *records_df* is the
     canonical frame the ids point into — either indexed by record id or
-    carrying a ``record_id`` column. *path*, when given, is the JSONL file
-    :meth:`record_label` appends to.
+    carrying a ``record_id`` column; ids on both sides are normalized to str
+    at construction, so integer record ids work throughout. *path*, when
+    given, is the JSONL file :meth:`record_label` appends to.
 
     Iterating yields one dict per pair: ``pair_id``, ``a``, ``b``,
     ``record_a`` / ``record_b`` (the two records as plain dicts), plus any
@@ -70,6 +71,9 @@ class PairQueue:
         records = records_df
         if "record_id" in records.columns:
             records = records.set_index("record_id")
+        # normalize ids to str ONCE so validation and .loc lookups agree on type
+        # (set_axis: the caller's frame keeps its original index untouched)
+        records = records.set_axis(records.index.astype(str), axis=0)
         if not records.index.is_unique:
             raise ValueError("records_df has duplicate record ids")
         self.records = records
@@ -83,7 +87,7 @@ class PairQueue:
         pairs.loc[swap, ["a", "b"]] = pairs.loc[swap, ["b", "a"]].to_numpy()
         pairs = pairs.drop_duplicates(subset=["a", "b"])
         pairs = pairs.sort_values(["a", "b"]).reset_index(drop=True)
-        known = set(map(str, records.index))
+        known = set(records.index)
         unknown = (set(pairs["a"]) | set(pairs["b"])) - known
         if unknown:
             raise ValueError(f"pairs reference ids absent from records: {sorted(unknown)[:5]}")
@@ -237,9 +241,7 @@ class AdjudicationWidget:
     def _render(self) -> None:
         total = len(self.queue)
         done = total - len(self._pending)
-        self._progress.value = (
-            f"<b>{done}/{total}</b> labeled (annotator: {self.annotator})"
-        )
+        self._progress.value = f"<b>{done}/{total}</b> labeled (annotator: {self.annotator})"
         if not self._pending:
             self._pair_html.value = "<i>Queue complete.</i>"
             return
@@ -248,8 +250,7 @@ class AdjudicationWidget:
         ra, rb = item["record_a"], item["record_b"]
         fields = sorted(set(ra) | set(rb))
         rows = "".join(
-            f"<tr><td><b>{f}</b></td><td>{_esc(ra.get(f))}</td>"
-            f"<td>{_esc(rb.get(f))}</td></tr>"
+            f"<tr><td><b>{f}</b></td><td>{_esc(ra.get(f))}</td><td>{_esc(rb.get(f))}</td></tr>"
             for f in fields
         )
         self._pair_html.value = (
@@ -266,6 +267,4 @@ def _esc(value) -> str:
     """Minimal HTML escaping for record values shown in the widget."""
     if value is None or value is pd.NA or (isinstance(value, float) and pd.isna(value)):
         return "<i>&mdash;</i>"
-    return (
-        str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    )
+    return str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")

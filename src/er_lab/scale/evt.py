@@ -122,25 +122,35 @@ def diagnostics_pass(fits: dict) -> tuple[bool, list[str]]:
     Returns ``(ok, reasons)`` — reasons is empty iff ok. The mean-excess curve
     is rendered for the notebook eye but NOT auto-gated: its linearity
     statistic is too noisy at smoke-tier sample sizes to make a fair gate.
+
+    Every comparison is written NaN-hostile — ``if not (value passes)`` — so a
+    non-finite diagnostic (e.g. NaN xi or NaN QQ r^2 from a piled-up constant
+    tail, exactly the ER pathology this gate exists to catch) FAILS the gate
+    with a 'non-finite diagnostic' reason instead of slipping past a ``<``.
     """
     per_u = fits["fits"]
     reasons: list[str] = []
     for q, f in per_u.items():
-        if f["n_exceed"] < MIN_EXCEEDANCES:
-            reasons.append(
-                f"n_exceed={f['n_exceed']} < {MIN_EXCEEDANCES} at u_quantile={q}"
-            )
+        if not (f["n_exceed"] >= MIN_EXCEEDANCES):
+            reasons.append(f"n_exceed={f['n_exceed']} < {MIN_EXCEEDANCES} at u_quantile={q}")
+        if not np.isfinite(f["xi"]):
+            reasons.append(f"non-finite diagnostic: xi={f['xi']} at u_quantile={q}")
     xis = {q: f["xi"] for q, f in per_u.items()}
     spread = max(xis.values()) - min(xis.values())
-    if spread > XI_SPREAD_TOL:
-        lo_q = min(xis, key=xis.get)  # type: ignore[arg-type]
-        hi_q = max(xis, key=xis.get)  # type: ignore[arg-type]
-        reasons.append(
-            f"xi not threshold-stable: spread {spread:.2f} > {XI_SPREAD_TOL} "
-            f"(xi={xis[lo_q]:.2f} at q={lo_q} vs xi={xis[hi_q]:.2f} at q={hi_q})"
-        )
+    if not (spread <= XI_SPREAD_TOL):
+        if np.isfinite(spread):
+            lo_q = min(xis, key=xis.get)  # type: ignore[arg-type]
+            hi_q = max(xis, key=xis.get)  # type: ignore[arg-type]
+            reasons.append(
+                f"xi not threshold-stable: spread {spread:.2f} > {XI_SPREAD_TOL} "
+                f"(xi={xis[lo_q]:.2f} at q={lo_q} vs xi={xis[hi_q]:.2f} at q={hi_q})"
+            )
+        else:
+            reasons.append(f"non-finite diagnostic: xi spread={spread} across thresholds")
     for q, d in fits["diagnostics"]["qq"].items():
-        if d["r2"] < QQ_R2_MIN:
+        if not np.isfinite(d["r2"]):
+            reasons.append(f"non-finite diagnostic: QQ r^2={d['r2']} at u_quantile={q}")
+        elif not (d["r2"] >= QQ_R2_MIN):
             reasons.append(f"QQ r^2={d['r2']:.3f} < {QQ_R2_MIN} at u_quantile={q}")
     return (not reasons, reasons)
 
@@ -246,9 +256,7 @@ def _mean_excess_curve(scores: np.ndarray, n_grid: int = 40) -> pd.DataFrame:
         exc = scores[scores > u] - u
         if len(exc) == 0:
             continue
-        rows.append(
-            {"quantile": q, "u": u, "mean_excess": float(exc.mean()), "n_exceed": len(exc)}
-        )
+        rows.append({"quantile": q, "u": u, "mean_excess": float(exc.mean()), "n_exceed": len(exc)})
     return pd.DataFrame(rows)
 
 
@@ -262,8 +270,7 @@ def _xi_stability(scores: np.ndarray, n_grid: int = 12) -> pd.DataFrame:
             continue
         xi, _, sigma = genpareto.fit(exc, floc=0)
         rows.append(
-            {"quantile": q, "u": u, "xi": float(xi), "sigma": float(sigma),
-             "n_exceed": len(exc)}
+            {"quantile": q, "u": u, "xi": float(xi), "sigma": float(sigma), "n_exceed": len(exc)}
         )
     return pd.DataFrame(rows)
 
@@ -289,6 +296,9 @@ def _qq(excesses: np.ndarray, xi: float, sigma: float) -> dict[str, Any]:
     if not np.isfinite(z).all():
         r2 = 0.0
     else:
-        r = np.corrcoef(-np.log(1 - grid), z)[0, 1]
-        r2 = float(r * r)
+        with np.errstate(invalid="ignore", divide="ignore"):  # zero-variance z
+            r = np.corrcoef(-np.log(1 - grid), z)[0, 1]
+        # (near-)zero-variance z — piled-up constant excesses — makes corrcoef
+        # NaN or numerically ~0: maximal misfit for the gate, never a silent pass
+        r2 = float(r * r) if np.isfinite(r) else 0.0
     return {"theoretical": theo, "empirical": emp, "r2": r2}

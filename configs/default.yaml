@@ -13,15 +13,25 @@ model:
   kind: scratch_char   # scratch_char | pretrained_subword
   name: null           # HF/sentence-transformers name for pretrained kinds
   dim: 256
+  layers: 4
+  heads: 4
   max_len: 192
 
 train:
   batch_size: 64
   epochs: 2
+  steps: 200           # exact optimizer-step budget (PLAN §3.1)
   lr: 3.0e-4
   loss: infonce
   miner: inbatch
+  miner_k: 10          # mined hard negatives per anchor
   augment: none
+  temperature: 0.05    # infonce/supcon temperature, cosent tau
+  margin: 0.2          # triplet cosine margin
+
+serialize:
+  scheme: colval       # colval | template | json | bare (er_lab.serialize.SCHEMES)
+  missing: token       # token (visible [MISSING]) | drop
 
 infra:
   device: auto         # auto | cpu | mps | cuda   (auto picks cuda > mps > cpu)

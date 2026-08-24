@@ -44,7 +44,9 @@ nc-legacy = ["zipfile-deflate64"]
 multi-gpu = ["accelerate"]
 
 [dependency-groups]
-dev = ["pytest", "ruff"]
+# accelerate sits in dev too (not only the multi-gpu extra) so the DDP training
+# path gets exercised in CI via a 2-process CPU `accelerate launch` test.
+dev = ["pytest", "ruff", "accelerate"]
 
 # torch comes from default PyPI on every platform: the macOS wheel includes MPS,
 # the Linux wheel includes CUDA 12 (right for the A100 node; the CPU-only smoke
@@ -61,6 +63,9 @@ packages = ["src/er_lab"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    "slow: takes tens of seconds (e.g. the 2-process CPU accelerate launch test)",
+]
 
 [tool.ruff]
 line-length = 100

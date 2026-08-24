@@ -98,13 +98,15 @@ def cosent(
     Purely rank-based: it pushes every positive pair's cosine above every
     negative pair's, with no absolute similarity target — which is why CAL-01
     still has to calibrate scores afterwards. Batches with only one class have
-    no ordering constraint and return exactly 0 (log 1).
+    no ordering constraint and return exactly 0 (log 1) — a zero that stays
+    connected to the input graph, so ``backward()`` is a harmless no-op step
+    rather than a 'does not require grad' error.
     """
     labels = torch.as_tensor(labels, device=emb_a.device).reshape(-1)
     sims = (F.normalize(emb_a, dim=-1) * F.normalize(emb_b, dim=-1)).sum(dim=-1)
     s_pos, s_neg = sims[labels == 1], sims[labels == 0]
-    zero = torch.zeros(1, dtype=sims.dtype, device=sims.device)
     if s_pos.numel() == 0 or s_neg.numel() == 0:
-        return zero.sum()
+        return sims.sum() * 0.0  # exact 0, graph-connected (zero gradients, not an error)
+    zero = torch.zeros(1, dtype=sims.dtype, device=sims.device)
     terms = ((s_neg.unsqueeze(0) - s_pos.unsqueeze(1)) / tau).reshape(-1)
     return torch.logsumexp(torch.cat([zero, terms]), dim=0)

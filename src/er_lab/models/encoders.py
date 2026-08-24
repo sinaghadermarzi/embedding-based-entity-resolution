@@ -198,18 +198,30 @@ class PretrainedEncoder(nn.Module):
             ) from exc
         self.dim = int(self.model.get_sentence_embedding_dimension())
 
+    def tokenize(self, texts: list[str], *, device: torch.device | str | None = None) -> dict:
+        """Texts -> the sentence-transformers feature dict :meth:`forward` consumes."""
+        features = self.model.tokenize(list(texts))
+        if device is not None:
+            features = {
+                k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in features.items()
+            }
+        return features
+
+    def forward(self, features: dict) -> torch.Tensor:
+        """Feature dict -> (B, dim) L2-normalized embeddings (differentiable).
+
+        A real ``forward`` (not just :meth:`embed_batch`) matters under DDP:
+        gradient-synchronization hooks only run through ``Module.__call__``.
+        """
+        return F.normalize(self.model(features)["sentence_embedding"], dim=-1)
+
     def embed_batch(
         self, texts: list[str], *, device: torch.device | str | None = None
     ) -> torch.Tensor:
         """Differentiable encode of one batch (normalized sentence embeddings)."""
         if device is not None:
             self.model.to(torch.device(device))
-        features = self.model.tokenize(list(texts))
-        if device is not None:
-            features = {
-                k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in features.items()
-            }
-        return F.normalize(self.model(features)["sentence_embedding"], dim=-1)
+        return self(self.tokenize(texts, device=device))
 
     @torch.no_grad()
     def encode(
@@ -245,17 +257,17 @@ class PretrainedEncoder(nn.Module):
 def build_encoder(cfg: DictConfig):
     """Factory on ``cfg.model.kind``: 'scratch_char' or 'pretrained'.
 
-    scratch_char reads dim/max_len (typed keys) plus optional extension keys
-    ``model.layers`` / ``model.heads`` / ``model.d_model`` / ``model.dropout``;
-    pretrained reads ``model.name`` (default all-MiniLM-L6-v2) and
-    ``paths.hf_local``.
+    scratch_char reads the typed keys ``model.dim`` / ``model.layers`` /
+    ``model.heads`` / ``model.max_len`` plus optional extension keys
+    ``model.d_model`` / ``model.dropout``; pretrained reads ``model.name``
+    (default all-MiniLM-L6-v2) and ``paths.hf_local``.
     """
     kind = str(cfg.model.kind)
     if kind == "scratch_char":
         return CharByteEncoder(
             dim=int(cfg.model.dim),
-            layers=int(cfg.model.get("layers", 2)),
-            heads=int(cfg.model.get("heads", 4)),
+            layers=int(cfg.model.layers),
+            heads=int(cfg.model.heads),
             max_len=int(cfg.model.max_len),
             d_model=cfg.model.get("d_model"),
             dropout=float(cfg.model.get("dropout", 0.0)),
