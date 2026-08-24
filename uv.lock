@@ -442,6 +442,7 @@ dependencies = [
     { name = "omegaconf" },
     { name = "pandas" },
     { name = "pyarrow" },
+    { name = "pyyaml" },
     { name = "requests" },
     { name = "scikit-learn" },
     { name = "scipy" },
@@ -452,6 +453,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+nc-legacy = [
+    { name = "zipfile-deflate64" },
+]
 pseudopeople = [
     { name = "pseudopeople" },
 ]
@@ -484,6 +488,7 @@ requires-dist = [
     { name = "pandas" },
     { name = "pseudopeople", marker = "extra == 'pseudopeople'" },
     { name = "pyarrow" },
+    { name = "pyyaml" },
     { name = "requests" },
     { name = "scikit-learn" },
     { name = "scipy" },
@@ -492,8 +497,9 @@ requires-dist = [
     { name = "torch" },
     { name = "tqdm" },
     { name = "umap-learn", marker = "extra == 'umap'" },
+    { name = "zipfile-deflate64", marker = "extra == 'nc-legacy'" },
 ]
-provides-extras = ["umap", "pseudopeople"]
+provides-extras = ["umap", "pseudopeople", "nc-legacy"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -2701,3 +2707,9 @@ sdist = { url = "https://files.pythonhosted.org/packages/b3/8f/705086c9d734d3b66
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e1/07/c6fe3ad3e685340704d314d765b7912993bcb8dc198f0e7a89382d37974b/win32_setctime-1.2.0-py3-none-any.whl", hash = "sha256:95d644c4e708aba81dc3704a116d8cbc974d70b3bdb8be1d150e36be6e9d1390", size = 4083, upload-time = "2024-12-07T15:28:26.465Z" },
 ]
+
+[[package]]
+name = "zipfile-deflate64"
+version = "0.2.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/03/1b/f397f821b48156ee94c5ca7ad82dc5cdb73cbcbc4377b9c1b21556f3ce8c/zipfile-deflate64-0.2.0.tar.gz", hash = "sha256:875a3299de102edf1c17f8cafcc528b1ca80b62dc4814b9cb56867ec59fbfd18", size = 62896, upload-time = "2022-01-05T09:24:39.575Z" }

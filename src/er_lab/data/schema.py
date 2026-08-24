@@ -58,7 +58,12 @@ def _join_verbatim(parts: list[pd.Series]) -> pd.Series:
     """Join aligned string columns with single spaces, dropping empty/missing parts.
 
     Parts are joined in the given order; a row with no non-empty part becomes NA.
-    Parts themselves are NOT trimmed or otherwise altered.
+    Parts themselves are NOT trimmed or otherwise altered. Deliberately, only NA
+    and ``''`` count as "missing": whitespace-only parts are kept VERBATIM. NC
+    snapshots pad blank fields with spaces (e.g. ``half_code=' '``), so an NC
+    street joins to something like ``'  WARD ST  '`` — that padding is part of
+    the noise under study (PRS-01 owns any standardization upstream), and this
+    join must not quietly clean it away.
     """
     values: list[str | None] = []
     for row in zip(*(p.tolist() for p in parts)):
@@ -81,6 +86,18 @@ class DeclaredSchema:
         unknown = set(self.roles) - ROLES
         if unknown:
             raise ValueError(f"schema '{self.name}': unknown roles {sorted(unknown)}")
+        duplicates = {c for c in self.extra_keep if self.extra_keep.count(c) > 1}
+        if duplicates:
+            raise ValueError(
+                f"schema '{self.name}': duplicate extra_keep columns {sorted(duplicates)}"
+            )
+        reserved = {"record_id", "entity_id", "source"} | set(self.roles)
+        collisions = set(self.extra_keep) & reserved
+        if collisions:
+            raise ValueError(
+                f"schema '{self.name}': extra_keep columns {sorted(collisions)} collide "
+                "with canonical output columns (record_id/entity_id/source or a role name)"
+            )
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> DeclaredSchema:

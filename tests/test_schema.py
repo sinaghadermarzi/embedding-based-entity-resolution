@@ -115,6 +115,45 @@ def test_multicolumn_join_order_and_empty_parts(toy_schema: DeclaredSchema) -> N
     assert out["street_address"][2] is pd.NA
 
 
+def test_join_keeps_whitespace_only_parts_verbatim() -> None:
+    # NC snapshots space-pad blank fields (half_code=' ', street_dir=' ', ...);
+    # whitespace-only parts are deliberately KEPT — the padding is part of the
+    # noise under study, so the join must not quietly clean it away.
+    s = DeclaredSchema(
+        name="t",
+        record_id=ROW_SENTINEL,
+        entity_id=None,
+        roles={"street": ["street_dir", "street_name", "street_sufx_cd"]},
+    )
+    df = pd.DataFrame({"street_dir": [" "], "street_name": [" WARD ST "], "street_sufx_cd": [" "]})
+    out = s.to_canonical(df)
+    assert out["street"][0] == "   WARD ST   "  # ' ' + ' ' + ' WARD ST ' + ' ' + ' '
+
+
+def test_extra_keep_collision_with_reserved_rejected() -> None:
+    for taken in ("record_id", "entity_id", "source"):
+        with pytest.raises(ValueError, match=taken):
+            DeclaredSchema(name="t", record_id="rid", entity_id=None, roles={}, extra_keep=[taken])
+
+
+def test_extra_keep_collision_with_role_rejected() -> None:
+    with pytest.raises(ValueError, match="given_name"):
+        DeclaredSchema(
+            name="t",
+            record_id="rid",
+            entity_id=None,
+            roles={"given_name": "first"},
+            extra_keep=["given_name"],
+        )
+
+
+def test_extra_keep_duplicates_rejected() -> None:
+    with pytest.raises(ValueError, match="duplicate"):
+        DeclaredSchema(
+            name="t", record_id="rid", entity_id=None, roles={}, extra_keep=["county", "county"]
+        )
+
+
 def test_row_sentinel_record_id() -> None:
     s = DeclaredSchema(name="t", record_id=ROW_SENTINEL, entity_id=None, roles={"full_name": "n"})
     out = s.to_canonical(pd.DataFrame({"n": ["a", "b", "c"]}))

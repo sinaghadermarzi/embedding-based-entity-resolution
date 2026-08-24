@@ -7,6 +7,10 @@
 # 'voter_reg_num' is unique per county only — county_id is kept in extra_keep so
 # (county_id, voter_reg_num) can disambiguate across counties.
 # '#' in name fields and 'xx/xx/xxxx' registr_dt are county-review masking, delivered verbatim.
+# Blank fields are SPACE-PADDED in the real files (e.g. half_code=' ', street_dir=' '),
+# and multi-column joins keep whitespace-only parts VERBATIM by design — street joins
+# to e.g. '  WARD ST  '. The padding is part of the noise under study (PRS-01 owns
+# standardization upstream); see _join_verbatim in er_lab/data/schema.py.
 name: nc_voter
 record_id: voter_reg_num
 entity_id: ncid

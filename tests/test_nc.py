@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import http.server
+import json
 import re
+import sys
 import threading
 import zipfile
 from pathlib import Path
@@ -125,7 +127,15 @@ def test_snapshot_url_rejects_non_dates():
 
 # ------------------------------------------------------------------ synthetic snapshot fixture
 
-HEADER = ["snapshot_dt", "county_id", "voter_reg_num", "ncid", "last_name", "first_name", "zip_code"]
+HEADER = [
+    "snapshot_dt",
+    "county_id",
+    "voter_reg_num",
+    "ncid",
+    "last_name",
+    "first_name",
+    "zip_code",
+]
 
 ROWS_A = [
     ["2020-01-01", "  1", "9001", "AA1", "SMITH  ", "MARY ", "27510"],
@@ -162,6 +172,74 @@ def test_parse_snapshot_verbatim(tmp_path):
     assert df["last_name"].tolist() == ["SMITH  ", "O'NEAL", "LEE"]
     assert df["first_name"][0] == "MARY "
     assert df["county_id"].tolist() == ["  1", "  1", " 92"]
+    # a clean parse still writes the stats sidecar, and no quarantine file
+    stats = json.loads((tmp_path / "a.parquet.stats.json").read_text())
+    assert stats == {"rows": 3, "padded_short_rows": 0, "ragged_long_rows": 0}
+    assert not (tmp_path / "a.parquet.ragged.json").exists()
+
+
+def test_parse_snapshot_quote_chars_kept_verbatim(tmp_path):
+    # real snapshots are UNQUOTED TSV: quote characters are data (nicknames), not syntax
+    rows = [
+        ["2020-01-01", "  1", "9001", "AA1", "SMITH", '"BOB" ROBERT', "27510"],
+    ]
+    zip_path = _snapshot_zip(tmp_path, "VR_Snapshot_20200101", rows)
+    df = pq.read_table(nc.parse_snapshot(zip_path, tmp_path / "quoted.parquet")).to_pandas()
+    assert df["first_name"].tolist() == ['"BOB" ROBERT']  # quotes survive untouched
+
+
+def test_parse_snapshot_unbalanced_quote_cannot_merge_rows(tmp_path):
+    # regression for QUOTE_MINIMAL: one unbalanced quote used to swallow tabs and
+    # newlines until the next quote, silently collapsing rows
+    rows = [
+        ["2020-01-01", "  1", "9001", "AA1", '"BOB', "MARY", "27510"],
+        ["2020-01-01", "  1", "9002", "AA2", "SMITH", "JO", "27511"],
+        ["2020-01-01", " 92", "9003", "AA3", "LEE", "ANA", "27601"],
+    ]
+    zip_path = _snapshot_zip(tmp_path, "VR_Snapshot_20200101", rows)
+    df = pq.read_table(nc.parse_snapshot(zip_path, tmp_path / "unbal.parquet")).to_pandas()
+    assert len(df) == 3  # 3 rows in -> 3 rows out
+    assert df["last_name"].tolist() == ['"BOB', "SMITH", "LEE"]  # leading quote verbatim
+    assert df["ncid"].tolist() == ["AA1", "AA2", "AA3"]
+
+
+def test_parse_snapshot_quarantines_overlong_rows(tmp_path):
+    rows = [
+        ROWS_A[0],
+        ROWS_A[1] + ["EXTRA", "MORE"],  # 2 fields too many — structural corruption
+        ROWS_A[2][:5],  # 2 fields short — padded, kept
+    ]
+    zip_path = _snapshot_zip(tmp_path, "VR_Snapshot_20200101", rows)
+    out = nc.parse_snapshot(zip_path, tmp_path / "ragged.parquet")
+    df = pq.read_table(out).to_pandas()
+    assert df["ncid"].tolist() == ["AA1", "AA3"]  # over-long row dropped, never truncated
+    assert df["zip_code"].tolist() == ["27510", ""]  # the short row was padded
+    stats = json.loads((tmp_path / "ragged.parquet.stats.json").read_text())
+    assert stats == {"rows": 2, "padded_short_rows": 1, "ragged_long_rows": 1}
+    quarantined = json.loads((tmp_path / "ragged.parquet.ragged.json").read_text())
+    assert quarantined == [{"row": 2, "fields": ROWS_A[1] + ["EXTRA", "MORE"]}]
+
+
+def test_parse_snapshot_deflate64_without_extra_raises(tmp_path, monkeypatch):
+    zip_path = _snapshot_zip(tmp_path, "VR_Snapshot_20051125", ROWS_A)
+
+    class _Deflate64Zip(zipfile.ZipFile):  # the 4 oldest snapshots use zip method 9
+        def infolist(self):
+            infos = super().infolist()
+            for info in infos:
+                info.compress_type = 9
+            return infos
+
+    monkeypatch.setattr(zipfile, "ZipFile", _Deflate64Zip)
+    monkeypatch.setitem(sys.modules, "zipfile_deflate64", None)  # force the ImportError
+    with pytest.raises(RuntimeError, match="nc-legacy") as excinfo:
+        nc.parse_snapshot(zip_path, tmp_path / "old.parquet")
+    msg = str(excinfo.value)
+    assert "VR_Snapshot_20051125.zip" in msg  # names the snapshot
+    for date in ("20051125", "20060210", "20061020", "20070119"):
+        assert date in msg  # names all four affected dates
+    assert "20081104" in msg  # earliest fully-supported without the extra
+    assert "uv sync --extra nc-legacy" in msg  # the remedy
 
 
 def test_parse_snapshot_utf16le_without_bom(tmp_path):
@@ -215,6 +293,44 @@ def test_align_pair(tmp_path):
     row = df[df["ncid"] == "AA2"].iloc[0]
     assert row["last_name_a"] == "O'NEAL"
     assert row["last_name_b"] == "ONEAL"
+
+
+def test_align_pair_drops_duplicated_ncids_and_reports_stats(tmp_path):
+    # AA3 appears twice in snapshot a: an overlay/data error, not two time points.
+    # Policy: ncids non-unique in EITHER input are excluded entirely (no cross-
+    # product rows); the counts feed the MET-05 ncid-stability gate.
+    rows_a = ROWS_A + [["2020-01-01", " 92", "9005", "AA3", "LEE", "ANN", "27601"]]
+    a = nc.parse_snapshot(
+        _snapshot_zip(tmp_path, "VR_Snapshot_20200101", rows_a), tmp_path / "a.parquet"
+    )
+    b = nc.parse_snapshot(
+        _snapshot_zip(tmp_path, "VR_Snapshot_20210101", ROWS_B), tmp_path / "b.parquet"
+    )
+    df, stats = nc.align_pair(a, b, return_stats=True)
+    assert df["ncid"].tolist() == ["AA2"]  # AA3 excluded — duplicated in a
+    assert stats == {"dup_ncids_a": 1, "dup_ncids_b": 0, "pairs": 1}
+    # without return_stats the return value stays a bare DataFrame
+    assert nc.align_pair(a, b)["ncid"].tolist() == ["AA2"]
+
+
+def test_align_pair_out_parquet_streams_to_file(tmp_path):
+    a = nc.parse_snapshot(
+        _snapshot_zip(tmp_path, "VR_Snapshot_20200101", ROWS_A), tmp_path / "a.parquet"
+    )
+    b = nc.parse_snapshot(
+        _snapshot_zip(tmp_path, "VR_Snapshot_20210101", ROWS_B), tmp_path / "b.parquet"
+    )
+    out, stats = nc.align_pair(
+        a, b, out_parquet=tmp_path / "pairs" / "ab.parquet", return_stats=True
+    )
+    assert out == tmp_path / "pairs" / "ab.parquet"
+    assert stats == {"dup_ncids_a": 0, "dup_ncids_b": 0, "pairs": 2}
+    df = pq.read_table(out).to_pandas()
+    other = [c for c in HEADER if c != "ncid"]
+    assert list(df.columns) == ["ncid"] + [f"{c}_a" for c in other] + [f"{c}_b" for c in other]
+    assert df["ncid"].tolist() == ["AA2", "AA3"]
+    assert df["last_name_a"].tolist() == ["O'NEAL", "LEE"]
+    assert df["last_name_b"].tolist() == ["ONEAL", "LEE"]
 
 
 def test_align_pair_requires_ncid(tmp_path):

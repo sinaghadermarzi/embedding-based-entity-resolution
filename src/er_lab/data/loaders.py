@@ -15,7 +15,7 @@ from pathlib import Path
 import pandas as pd
 import requests
 
-from er_lab.data.schema import DeclaredSchema
+from er_lab.data.schema import ROW_SENTINEL, DeclaredSchema
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCHEMA_DIR = REPO_ROOT / "configs" / "schemas"
@@ -28,6 +28,10 @@ ONC_RAW_BASE = "https://raw.githubusercontent.com/onc-healthit/patient-matching/
 _ONC_FILE_RE = re.compile(
     r"^ONC Patient Matching Algorithm Challenge Test Dataset\.(?P<segment>[^.]+)\.csv$"
 )
+#: The repo's known segment labels (8 alphabetical + the null-last-name file) — the
+#: default selection, so ``letters=None`` never needs the contents API once the
+#: files are on disk.
+_ONC_SEGMENTS = ("A-C", "D-F", "G-I", "J-mid L", "mid L - N", "O-R", "S", "T-Z", "Null")
 
 _seen_notes: set[str] = set()
 
@@ -91,8 +95,15 @@ def _checksum_gate(path: Path) -> None:
 
 
 def _gated_files(raw_dir: Path, patterns: tuple[str, ...], missing_msg: str) -> list[Path]:
-    """Checksum-gated local files under ``raw_dir``; FileNotFoundError with instructions if none."""
+    """Checksum-gated local files under ``raw_dir``; FileNotFoundError with instructions if none.
+
+    Files directly in ``raw_dir`` are preferred; only when none match is one
+    directory level down (``*/<pattern>``) searched too — archives often extract
+    into a subdirectory. Deeper nesting is never searched.
+    """
     files = sorted(p for pat in patterns for p in raw_dir.glob(pat) if p.is_file())
+    if not files:
+        files = sorted(p for pat in patterns for p in raw_dir.glob(f"*/{pat}") if p.is_file())
     if not files:
         raise FileNotFoundError(missing_msg)
     for path in files:
@@ -180,6 +191,29 @@ def _onc_select(entries: list[dict], letters: list[str] | None) -> list[dict]:
     return selected
 
 
+def _onc_name(segment: str) -> str:
+    return f"ONC Patient Matching Algorithm Challenge Test Dataset.{segment}.csv"
+
+
+def _onc_discover(onc_dir: Path) -> list[dict]:
+    """Repo listing via the GitHub contents API, falling back to files already on disk.
+
+    The API is unauthenticated-rate-limited (60 req/hr) and unreachable offline;
+    when it fails but 'ONC Patient Matching*.csv' files were already downloaded
+    into ``onc_dir``, those are listed instead — cached reruns never need the API.
+    """
+    try:
+        return _onc_entries()
+    except (requests.RequestException, RuntimeError) as exc:
+        local = sorted(p.name for p in onc_dir.glob("ONC Patient Matching*.csv"))
+        if not local:
+            raise RuntimeError(
+                f"ONC discovery failed ({exc}) and no already-downloaded "
+                f"'ONC Patient Matching*.csv' files under {onc_dir}"
+            ) from exc
+        return [{"name": name} for name in local]
+
+
 def load_onc(
     data_root: str | Path,
     *,
@@ -190,18 +224,46 @@ def load_onc(
 
     DOB arrives as Excel-style serial integers and is delivered verbatim as a string —
     the noise is the object of study, do not convert downstream of here either.
+
+    Stability contract: ``record_id`` is self-describing — ``'<segment>:<row>'``
+    with ``row`` the 0-based position inside that segment's csv — so the same
+    physical record keeps the same id under any ``letters`` selection, listing
+    order, or concatenation. Only an upstream change to a segment file itself can
+    renumber its rows. (Applied when the schema synthesizes ids, i.e.
+    ``record_id: __row__``; a custom schema naming a real id column keeps it.)
+
+    Discovery: ``letters=None`` with all default segment files already on disk
+    uses the canned segment list — no network. Otherwise the GitHub contents API
+    is consulted, falling back to already-downloaded files when it is unreachable
+    or rate-limited (see ``_onc_discover``).
     """
     _provenance_note("onc", _ONC_TERMS)
-    selected = _onc_select(_onc_entries(), letters)
+    schema = _schema("onc", schema_path)
+    onc_dir = Path(data_root) / "onc"
+    if letters is None:
+        canned = [{"name": _onc_name(seg)} for seg in _ONC_SEGMENTS]
+        if all((onc_dir / entry["name"]).exists() for entry in canned):
+            entries = canned
+        else:
+            entries = _onc_discover(onc_dir)
+    else:
+        entries = _onc_discover(onc_dir)
+    selected = _onc_select(entries, letters)
     frames = []
+    record_ids: list[str] = []
     for entry in selected:
-        dest = Path(data_root) / "onc" / entry["name"]
+        dest = onc_dir / entry["name"]
         url = entry.get("download_url") or f"{ONC_RAW_BASE}/{requests.utils.quote(entry['name'])}"
         _download(url, dest)
-        frames.append(_read_csv_verbatim(dest))
+        frame = _read_csv_verbatim(dest)
+        segment = _ONC_FILE_RE.match(entry["name"]).group("segment")
+        record_ids.extend(f"{segment}:{i}" for i in range(len(frame)))
+        frames.append(frame)
     df = pd.concat(frames, ignore_index=True)
-    schema = _schema("onc", schema_path)
-    return schema.to_canonical(df), schema
+    out = schema.to_canonical(df)
+    if schema.record_id == ROW_SENTINEL:
+        out["record_id"] = pd.Series(record_ids, index=out.index, dtype="string")
+    return out, schema
 
 
 # --------------------------------------------------------------------------- checksum-gated local
@@ -223,6 +285,8 @@ def _bpid_missing_msg(raw_dir: Path) -> str:
         "zenodo.org is blocked from the build container, so this download is user-side:\n"
         "  1. Download the BPID archive (Apache-2.0) from https://zenodo.org/records/13932202\n"
         f"  2. Extract its files into {raw_dir}/\n"
+        "Files must sit directly in that directory or exactly one subdirectory level down\n"
+        "(an extracted archive folder); deeper nesting is not searched.\n"
         "The loader records a .sha256 sidecar per file on first load and verifies it on\n"
         "later loads. See DATA_GOVERNANCE.md — the repo ships scripts and checksums, never data."
     )
@@ -235,6 +299,8 @@ def _ohio_missing_msg(raw_dir: Path) -> str:
         "  1. Download the statewide voter files from the Ohio Secretary of State portal:\n"
         "     https://www6.ohiosos.gov/ords/f?p=VOTERFTP:STWD\n"
         f"  2. Place the extracted files (.txt/.csv, gzip ok) into {raw_dir}/\n"
+        "Files must sit directly in that directory or exactly one subdirectory level down\n"
+        "(an extracted archive folder); deeper nesting is not searched.\n"
         "The loader records a .sha256 sidecar per file on first load and verifies it on\n"
         "later loads. See DATA_GOVERNANCE.md — the repo ships scripts and checksums, never data."
     )
@@ -243,29 +309,58 @@ def _ohio_missing_msg(raw_dir: Path) -> str:
 def load_bpid(
     data_root: str | Path, *, schema_path: str | Path | None = None
 ) -> tuple[pd.DataFrame, DeclaredSchema]:
-    """BPID profiles from ``data_root/raw/bpid/`` (largest file = the 1M-profile table)."""
+    """BPID profiles from ``data_root/raw/bpid/`` (largest file = the 1M-profile table).
+
+    Stability contract: ``record_id`` is ``'<filename_stem>:<row>'`` (0-based row
+    within the file), so ids stay stable across runs for as long as the file
+    itself is unchanged — which the sha256 gate enforces. (Applied when the
+    schema synthesizes ids, i.e. ``record_id: __row__``.)
+
+    The schema yaml is resolved before any file is hashed, so a missing/broken
+    schema fails fast instead of after minutes of hashing.
+    """
     _provenance_note("bpid", _BPID_TERMS)
+    schema = _schema("bpid", schema_path)  # before _gated_files: fail before hashing GBs
     raw_dir = Path(data_root) / "raw" / "bpid"
     files = _gated_files(raw_dir, ("*.csv", "*.parquet"), _bpid_missing_msg(raw_dir))
     records = max(files, key=lambda p: p.stat().st_size)
-    df = (
-        pd.read_parquet(records)
-        if records.suffix == ".parquet"
-        else _read_csv_verbatim(records)
-    )
-    schema = _schema("bpid", schema_path)
-    return schema.to_canonical(df), schema
+    df = pd.read_parquet(records) if records.suffix == ".parquet" else _read_csv_verbatim(records)
+    out = schema.to_canonical(df)
+    if schema.record_id == ROW_SENTINEL:
+        out["record_id"] = pd.Series(
+            [f"{records.stem}:{i}" for i in range(len(df))], index=out.index, dtype="string"
+        )
+    return out, schema
 
 
 def load_ohio(
     data_root: str | Path, *, schema_path: str | Path | None = None
 ) -> tuple[pd.DataFrame, DeclaredSchema]:
-    """Ohio statewide voter file from ``data_root/raw/ohio/`` (row-partitioned files concatenated)."""
+    """Ohio statewide voter file from ``data_root/raw/ohio/`` (row-partitioned files concatenated).
+
+    Stability contract: ``record_id`` is ``'<filename_stem>:<row>'`` (0-based row
+    within that file), so the same physical record keeps the same id regardless of
+    which other partition files are present or how they are ordered; the sha256
+    gate keeps each file's own numbering stable. (Applied when the schema
+    synthesizes ids, i.e. ``record_id: __row__``.)
+
+    The schema yaml is resolved before any file is hashed, so a missing/broken
+    schema fails fast instead of after minutes of hashing the statewide files.
+    """
     _provenance_note("ohio", _OHIO_TERMS)
+    schema = _schema("ohio", schema_path)  # before _gated_files: fail before hashing GBs
     raw_dir = Path(data_root) / "raw" / "ohio"
     files = _gated_files(
         raw_dir, ("*.csv", "*.txt", "*.csv.gz", "*.txt.gz"), _ohio_missing_msg(raw_dir)
     )
-    df = pd.concat([_read_csv_verbatim(path) for path in files], ignore_index=True)
-    schema = _schema("ohio", schema_path)
-    return schema.to_canonical(df), schema
+    frames = []
+    record_ids: list[str] = []
+    for path in files:
+        frame = _read_csv_verbatim(path)
+        record_ids.extend(f"{path.stem}:{i}" for i in range(len(frame)))
+        frames.append(frame)
+    df = pd.concat(frames, ignore_index=True)
+    out = schema.to_canonical(df)
+    if schema.record_id == ROW_SENTINEL:
+        out["record_id"] = pd.Series(record_ids, index=out.index, dtype="string")
+    return out, schema

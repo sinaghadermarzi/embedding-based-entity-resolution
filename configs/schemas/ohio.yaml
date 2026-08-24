@@ -1,0 +1,29 @@
+# Ohio statewide voter file (ohiosos.gov VOTERFTP, row-partitioned SWVF_* files).
+# UNVERIFIED pending first real download — www6.ohiosos.gov is blocked from the build
+# sandbox; column names below follow the documented statewide layout and MUST be
+# re-verified against the user-side download in data/raw/ohio/ (checksum-gated
+# loader) before first use — like bpid.yaml.
+# SOS_VOTERID is the statewide voter id: a pseudo-truth key across snapshots/files,
+# not a per-row id (re-registrations can reuse rows), so it is entity_id and
+# record_id is synthesized ('<filename_stem>:<row>' via load_ohio).
+# Full DOB is present (DATE_OF_BIRTH) — unlike NC, which publishes age only.
+name: ohio
+record_id: __row__
+entity_id: SOS_VOTERID
+roles:
+  given_name: FIRST_NAME
+  middle_name: MIDDLE_NAME
+  family_name: LAST_NAME
+  name_suffix: SUFFIX
+  dob: DATE_OF_BIRTH
+  street_address: RESIDENTIAL_ADDRESS1
+  city: RESIDENTIAL_CITY
+  state: RESIDENTIAL_STATE
+  zip: RESIDENTIAL_ZIP
+extra_keep:
+  - REGISTRATION_DATE
+  - PARTY_AFFILIATION
+  - MAILING_ADDRESS1
+  - MAILING_CITY
+  - MAILING_STATE
+  - MAILING_ZIP

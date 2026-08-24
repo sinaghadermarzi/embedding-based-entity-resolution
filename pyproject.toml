@@ -24,6 +24,7 @@ dependencies = [
     "gecko-syndata",
     "tqdm",
     "requests",
+    "pyyaml",
     "jupytext",
     "nbformat",
     "nbclient",
@@ -34,6 +35,9 @@ dependencies = [
 [project.optional-dependencies]
 umap = ["umap-learn"]
 pseudopeople = ["pseudopeople"]
+# Deflate64 (zip method 9) support for the four oldest NC snapshots (2005-2007);
+# without it the earliest fully-supported snapshot is 20081104 — see er_lab.data.nc.
+nc-legacy = ["zipfile-deflate64"]
 
 [dependency-groups]
 dev = ["pytest", "ruff"]
