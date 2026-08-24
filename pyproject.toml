@@ -38,6 +38,10 @@ pseudopeople = ["pseudopeople"]
 # Deflate64 (zip method 9) support for the four oldest NC snapshots (2005-2007);
 # without it the earliest fully-supported snapshot is 20081104 — see er_lab.data.nc.
 nc-legacy = ["zipfile-deflate64"]
+# Single-node multi-GPU training (the 4xA100 node) via accelerate; the smoke
+# container never installs this — er_lab.train.loop lazy-imports it only when
+# cfg.infra.multi_gpu is set.
+multi-gpu = ["accelerate"]
 
 [dependency-groups]
 dev = ["pytest", "ruff"]

@@ -41,6 +41,7 @@ equal the CI collapses to that value under either method.
 from __future__ import annotations
 
 import inspect
+import itertools
 from collections.abc import Callable
 
 import numpy as np
@@ -130,7 +131,7 @@ def _co_pair_keys(codes: np.ndarray) -> np.ndarray:
     sorted_codes = codes[order]
     bounds = np.flatnonzero(np.r_[True, sorted_codes[1:] != sorted_codes[:-1], True])
     keys: list[np.ndarray] = []
-    for s, e in zip(bounds[:-1], bounds[1:]):
+    for s, e in itertools.pairwise(bounds):
         group = np.sort(order[s:e])
         if len(group) >= 2:
             ii, jj = np.triu_indices(len(group), k=1)
@@ -243,8 +244,15 @@ def _bca_interval(
     prop = min(max(prop, 1.0 / (n + 1)), n / (n + 1.0))
     z0 = float(ndtri(prop))
     d = jack.mean() - jack
-    denom = float((d**2).sum()) ** 1.5
-    a = float((d**3).sum()) / (6.0 * denom) if denom > 0 else 0.0
+    # scale-aware zero test: a numerically-constant jackknife leaves rounding
+    # residue ~eps*|jack| in d, and the a-ratio would amplify that noise to
+    # O(1); genuine accelerations come from spreads many orders larger
+    tol = 1e-12 * max(1.0, float(np.abs(jack).max()))
+    if float(np.abs(d).max()) < tol:
+        a = 0.0
+    else:
+        denom = float((d**2).sum()) ** 1.5
+        a = float((d**3).sum()) / (6.0 * denom)
 
     def level(z_alpha: float) -> float:
         z = z0 + z_alpha

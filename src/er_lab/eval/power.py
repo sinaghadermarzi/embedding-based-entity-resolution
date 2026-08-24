@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 from scipy.special import ndtr, ndtri
 
-__all__ = ["variance_components", "seeds_needed", "power_table"]
+__all__ = ["power_table", "seeds_needed", "variance_components"]
 
 
 def variance_components(

@@ -142,9 +142,7 @@ class CharByteEncoder(nn.Module):
         """
         if not texts:
             return np.zeros((0, self.dim), dtype=np.float32)
-        device = (
-            next(self.parameters()).device if device is None else torch.device(device)
-        )
+        device = next(self.parameters()).device if device is None else torch.device(device)
         dtype = torch.float32 if dtype is None else dtype
         was_training = self.training
         self.eval().to(device)
@@ -209,8 +207,7 @@ class PretrainedEncoder(nn.Module):
         features = self.model.tokenize(list(texts))
         if device is not None:
             features = {
-                k: v.to(device) if isinstance(v, torch.Tensor) else v
-                for k, v in features.items()
+                k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in features.items()
             }
         return F.normalize(self.model(features)["sentence_embedding"], dim=-1)
 
@@ -230,9 +227,7 @@ class PretrainedEncoder(nn.Module):
         """
         if not texts:
             return np.zeros((0, self.dim), dtype=np.float32)
-        device = (
-            next(self.parameters()).device if device is None else torch.device(device)
-        )
+        device = next(self.parameters()).device if device is None else torch.device(device)
         dtype = torch.float32 if dtype is None else dtype
         with _autocast(device, dtype):
             out = self.model.encode(
@@ -266,7 +261,5 @@ def build_encoder(cfg: DictConfig):
             dropout=float(cfg.model.get("dropout", 0.0)),
         )
     if kind == "pretrained":
-        return PretrainedEncoder(
-            cfg.model.name or DEFAULT_PRETRAINED, hf_local=cfg.paths.hf_local
-        )
+        return PretrainedEncoder(cfg.model.name or DEFAULT_PRETRAINED, hf_local=cfg.paths.hf_local)
     raise ValueError(f"unknown model.kind {kind!r}: expected 'scratch_char' or 'pretrained'")

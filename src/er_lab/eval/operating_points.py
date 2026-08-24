@@ -30,8 +30,8 @@ import pandas as pd
 from er_lab.eval.metrics import bcubed, pairwise
 
 __all__ = [
-    "find_threshold_for_precision",
     "cost_optimal_threshold",
+    "find_threshold_for_precision",
     "fp_budget_threshold",
 ]
 

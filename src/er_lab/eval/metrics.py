@@ -27,12 +27,12 @@ import pandas as pd
 
 __all__ = [
     "bcubed",
+    "blocking_metrics",
+    "cluster_f",
+    "generalized_merge_distance",
+    "pair_completeness_bounds",
     "pairwise",
     "variation_of_information",
-    "generalized_merge_distance",
-    "cluster_f",
-    "blocking_metrics",
-    "pair_completeness_bounds",
 ]
 
 
