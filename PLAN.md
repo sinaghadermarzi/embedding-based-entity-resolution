@@ -24,6 +24,13 @@ everything:
    each protocol rule exists (metric-choice rank reversals, CI under-coverage from wrong bootstrap
    units, optimism from leaky splits) before any embedding is trained.
 
+**Deliberate scope exclusion — privacy.** This lab studies matching quality, statistics, and scale.
+Privacy-preserving record linkage, embedding-inversion/membership-inference risk, and the legal
+status of person embeddings are **intentionally out of scope**: experiments run on public-record and
+synthetic data, the repo ships download scripts rather than data, and no claim in this lab concerns
+privacy protection. The literature review surveys the privacy landscape only to mark this boundary;
+`DATA_GOVERNANCE.md` remains, but strictly as dataset licensing/terms hygiene.
+
 **Novelty positioning** (defended in `notes/lit_review.md`): every claim is a protocol/measurement
 claim. We explicitly renounce novel losses, miners, index structures, clustering algorithms, parsers,
 and any live 1e9 benchmark. What does not exist publicly — and what this lab builds — is the
@@ -82,7 +89,6 @@ Tier = where the definitive run happens. EXPL = exploratory arm (cheap, clearly 
 | EFF-02 · EXPL | Static-distilled encoder (~100× cheaper inference): tolerable person-ER blocking quality? | mid |
 | X01 · EXPL | Marginal value per dollar of a small cross-encoder reranker over embedding retrieval | mid |
 | X02 · EXPL | Entity-ID churn under incremental snapshot updates | mid |
-| X03 · EXPL | Leakage probe of trained embeddings (attribute inference; tail-entity membership inference) → feeds the release-policy memo | mid |
 
 **Pruning:** MET-04's power table is binding. Protected-arm priority when compute forces cuts:
 TRN-02 > TRN-03 chain > TRN-04 > TRN-01 > TRN-05/06. Factor sets are locked in §3.1; any
@@ -185,7 +191,7 @@ verdict boxes at the end. Figures render only from registered artifacts.
 | 16 | Unequal Noise, Unequal Errors | FAIR-01 both-sides disparity; exposure-vs-mechanism decomposition; label-error robustness bands |
 | 17 | The Verdict at 1e7 | Headline hybrid-vs-FS-vs-pure comparison under full protocol; honesty audit |
 | 18 | Your Data, Your Schema | ADP-01 adaptation walkthrough (ONC), audit re-calibration, battery as acceptance test; linkage mode incl. the ADP-02 NC↔OH target-tier arm |
-| A | Appendix: Exploratory Arms | X01 / X02 / X03 / EFF-02; negative results; all labeled exploratory |
+| A | Appendix: Exploratory Arms | X01 / X02 / EFF-02; negative results; all labeled exploratory |
 
 ## 7. Package and infrastructure
 
@@ -223,14 +229,17 @@ in CI); cross-backend reproducibility policy with stated per-metric tolerances (
 
 **In:** dedup primary + one linkage chapter (ADP-01 conversion, ADP-02 target arm); all four noise axes with measured prevalence; both model
 regimes head-to-head; sparse-vs-dense adjudication; fairness as measurement-with-robustness-bands
-(deliberately not the headline); privacy as one exploratory probe + release-policy memo; US/English
-resources with the limitation stated on every affected claim.
+(deliberately not the headline); US/English resources with the limitation stated on every affected
+claim.
 
-**Out (explicit):** novel algorithms of any kind; live 1e9 runs; the 1e8 NC assembly as a *promised*
-deliverable (feasibility-gated at MET-05; a failed gate is a documented finding and NC demotes to
-noise-audit substrate); non-Latin scripts beyond lexicon coverage (stated future work); LLM
-pair-matchers on real PII (privacy; the small local reranker X01 is the only reranking arm); Florida
-data; production serving concerns beyond the X02 ID-churn probe.
+**Out (explicit):** privacy constraints in their entirety — privacy-preserving record linkage,
+embedding leakage/inversion analysis, DP training, and the legal status of embeddings — per the
+deliberate exclusion in §1; novel algorithms of any kind; live 1e9 runs; the 1e8 NC assembly as a
+*promised* deliverable (feasibility-gated at MET-05; a failed gate is a documented finding and NC
+demotes to noise-audit substrate); non-Latin scripts beyond lexicon coverage (stated future work);
+LLM pair-matchers on real person data (sending it to external APIs conflicts with dataset terms; the
+small local reranker X01 is the only reranking arm); Florida data; production serving concerns
+beyond the X02 ID-churn probe.
 
 ## 10. Sign-off gate
 
