@@ -1,0 +1,40 @@
+# Lab-wide defaults — the base layer of every run.
+# Typed schema: src/er_lab/config.py (LabConfig); keep the two in sync.
+# Override with a run yaml and/or dotlist, e.g.:
+#   uv run python -m er_lab.run nb=05 run.tier=smoke train.batch_size=128
+
+run:
+  tier: smoke          # smoke | mid | target | analytical
+  seed: 17
+  seeds: [17, 23, 29]
+  name: dev
+
+model:
+  kind: scratch_char   # scratch_char | pretrained_subword
+  name: null           # HF/sentence-transformers name for pretrained kinds
+  dim: 256
+  max_len: 192
+
+train:
+  batch_size: 64
+  epochs: 2
+  lr: 3.0e-4
+  loss: infonce
+  miner: inbatch
+  augment: none
+
+infra:
+  device: auto         # auto | cpu | mps | cuda   (auto picks cuda > mps > cpu)
+  precision: auto      # auto | fp32 | fp16 | bf16 (auto: cpu/mps fp32, cuda bf16)
+  num_workers: 2
+  multi_gpu: false
+
+data:
+  dataset: historical_50k
+  schema: configs/schemas/historical_50k.yaml
+  n_records: null      # subsample cap; null = full corpus
+
+paths:
+  data_root: data
+  artifacts_root: artifacts
+  hf_local: null       # local pretrained-weight dir (HF blocked at smoke tier — COMPAT.md)
