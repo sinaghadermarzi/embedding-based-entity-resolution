@@ -1,0 +1,15 @@
+# splink_datasets fake_1000 — synthetic quickstart/CI corpus.
+# Header VERIFIED 2026-08-24 from
+#   https://raw.githubusercontent.com/moj-analytical-services/splink_datasets/master/data/fake_1000.csv
+#   unique_id,first_name,surname,dob,city,email,cluster
+# Full DOB present (ISO yyyy-mm-dd). 'cluster' is the ground-truth entity key.
+name: fake_1000
+record_id: unique_id
+entity_id: cluster
+roles:
+  given_name: first_name
+  family_name: surname
+  dob: dob
+  city: city
+  email: email
+extra_keep: []

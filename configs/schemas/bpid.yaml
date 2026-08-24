@@ -1,0 +1,16 @@
+# BPID benchmark (Zenodo 13932202, Apache-2.0): 1M synthetic PII profiles + 10k labeled pairs.
+# UNVERIFIED — zenodo.org is blocked from the build sandbox; column names below are from the
+# Stage B source sweep (name, email, phone, address, birthdate) and MUST be re-verified against
+# the user-side download in data/raw/bpid/ (checksum-gated loader) before first use.
+# Ground truth arrives as a labeled-pairs file, not a column, so entity_id is null; profiles
+# carry no row id in the sweep notes, so record_id is synthesized from the row position.
+name: bpid
+record_id: __row__
+entity_id: null
+roles:
+  full_name: name
+  email: email
+  phone: phone
+  street_address: address
+  dob: birthdate
+extra_keep: []

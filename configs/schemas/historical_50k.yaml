@@ -1,0 +1,19 @@
+# splink_datasets historical_50k — Wikidata-derived historical persons with injected
+# errors; the notebook-00 quickstart corpus. Schema VERIFIED 2026-08-24 with pyarrow from
+#   https://raw.githubusercontent.com/moj-analytical-services/splink_datasets/master/data/historical_figures_with_errors_50k.parquet
+#   (50578 rows, all string columns): unique_id, cluster, full_name, first_and_surname,
+#   first_name, surname, dob, birth_place, postcode_fake, gender, occupation
+# Full DOB present. 'cluster' is the ground-truth entity key.
+# 'first_and_surname' is a derived concatenation of first_name + surname — not carried.
+name: historical_50k
+record_id: unique_id
+entity_id: cluster
+roles:
+  full_name: full_name
+  given_name: first_name
+  family_name: surname
+  dob: dob
+  city: birth_place # place of birth — this corpus's only locality field
+  zip: postcode_fake
+  sex: gender
+extra_keep: [occupation]

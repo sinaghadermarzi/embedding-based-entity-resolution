@@ -1,0 +1,25 @@
+# ONC patient-matching challenge (github.com/onc-healthit/patient-matching).
+# Header (verified during the Stage B source sweep):
+#   EnterpriseID,LAST,FIRST,MIDDLE,SUFFIX,DOB,GENDER,SSN,ADDRESS1,ADDRESS2,ZIP,
+#   MOTHERS_MAIDEN_NAME,MRN,CITY,STATE,PHONE,PHONE2,EMAIL,ALIAS
+# EnterpriseID is the TRUTH key — rows sharing it are the same person — and the file
+# has no per-row id, so record_id is synthesized from the row position (__row__).
+# Research-use only, no redistribution (no LICENSE upstream) — see DATA_GOVERNANCE.md.
+name: onc
+record_id: __row__
+entity_id: EnterpriseID
+roles:
+  given_name: FIRST
+  middle_name: MIDDLE
+  family_name: LAST
+  name_suffix: SUFFIX
+  dob: DOB
+  sex: GENDER
+  ssn_like: SSN
+  street_address: [ADDRESS1, ADDRESS2]
+  city: CITY
+  state: STATE
+  zip: ZIP
+  phone: PHONE
+  email: EMAIL
+extra_keep: [PHONE2, MOTHERS_MAIDEN_NAME, MRN, ALIAS]
