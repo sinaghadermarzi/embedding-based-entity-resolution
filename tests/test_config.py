@@ -9,7 +9,14 @@ import torch
 from omegaconf import OmegaConf
 from omegaconf.errors import ValidationError
 
-from er_lab.config import config_hash, load_config, set_all_seeds
+from er_lab.config import (
+    DEFAULT_YAML,
+    LabConfig,
+    config_hash,
+    load_config,
+    load_config_from_env,
+    set_all_seeds,
+)
 
 
 def test_default_load_matches_contract():
@@ -38,6 +45,29 @@ def test_default_load_matches_contract():
     assert cfg.paths.data_root == "data"
     assert cfg.paths.artifacts_root == "artifacts"
     assert cfg.paths.hf_local is None
+
+
+def test_default_yaml_matches_dataclass_defaults():
+    """configs/default.yaml hand-duplicates LabConfig; drift would win the merge silently."""
+    assert OmegaConf.to_container(OmegaConf.structured(LabConfig)) == OmegaConf.to_container(
+        OmegaConf.load(DEFAULT_YAML)
+    )
+
+
+def test_load_config_from_env_applies_runner_injected_env(monkeypatch):
+    monkeypatch.setenv("ER_LAB_DOTLIST", '["train.batch_size=128"]')
+    monkeypatch.setenv("ER_LAB_TIER", "target")
+    monkeypatch.setenv("ER_LAB_ARTIFACTS", "/somewhere/artifacts")
+    cfg = load_config_from_env()
+    assert cfg.train.batch_size == 128
+    assert cfg.run.tier == "target"
+    assert cfg.paths.artifacts_root == "/somewhere/artifacts"
+
+
+def test_load_config_from_env_is_plain_load_config_outside_a_kernel(monkeypatch):
+    for var in ("ER_LAB_DOTLIST", "ER_LAB_TIER", "ER_LAB_ARTIFACTS"):
+        monkeypatch.delenv(var, raising=False)
+    assert OmegaConf.to_container(load_config_from_env()) == OmegaConf.to_container(load_config())
 
 
 def test_dotlist_override_changes_value_and_hash():
@@ -78,7 +108,9 @@ def test_hash_independent_of_key_order():
     b = OmegaConf.create({"y": 3, "x": {"a": 2, "b": 1}})
     assert config_hash(a) == config_hash(b)
     # ...but list order is meaning-bearing and must change the hash
-    assert config_hash(OmegaConf.create({"s": [1, 2]})) != config_hash(OmegaConf.create({"s": [2, 1]}))
+    assert config_hash(OmegaConf.create({"s": [1, 2]})) != config_hash(
+        OmegaConf.create({"s": [2, 1]})
+    )
 
 
 def test_set_all_seeds_reproducible():

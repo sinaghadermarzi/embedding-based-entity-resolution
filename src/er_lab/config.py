@@ -8,10 +8,11 @@ are type-checked on merge; unknown keys are allowed (thin lab, not a framework).
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
 
 import numpy as np
 import torch
@@ -26,14 +27,14 @@ DEFAULT_YAML = REPO_ROOT / "configs" / "default.yaml"
 class RunConfig:
     tier: str = "smoke"  # smoke | mid | target | analytical
     seed: int = 17
-    seeds: List[int] = field(default_factory=lambda: [17, 23, 29])
+    seeds: list[int] = field(default_factory=lambda: [17, 23, 29])
     name: str = "dev"
 
 
 @dataclass
 class ModelConfig:
     kind: str = "scratch_char"
-    name: Optional[str] = None
+    name: str | None = None
     dim: int = 256
     max_len: int = 192
 
@@ -60,14 +61,14 @@ class InfraConfig:
 class DataConfig:
     dataset: str = "historical_50k"
     schema: str = "configs/schemas/historical_50k.yaml"
-    n_records: Optional[int] = None
+    n_records: int | None = None
 
 
 @dataclass
 class PathsConfig:
     data_root: str = "data"
     artifacts_root: str = "artifacts"
-    hf_local: Optional[str] = None
+    hf_local: str | None = None
 
 
 @dataclass
@@ -93,6 +94,24 @@ def load_config(yaml_path: str | None = None, dotlist: list[str] | None = None) 
     OmegaConf.set_struct(merged, False)
     assert isinstance(merged, DictConfig)
     return merged
+
+
+def load_config_from_env() -> DictConfig:
+    """Config for a runner-launched kernel — the standard first call of every notebook.
+
+    Layers the defaults with the CLI dotlist the notebook runner forwarded as
+    JSON in ``ER_LAB_DOTLIST``, then pins ``run.tier`` / ``paths.artifacts_root``
+    from ``ER_LAB_TIER`` / ``ER_LAB_ARTIFACTS`` when the runner injected them.
+    Outside a runner kernel (no env vars set) this is just ``load_config()``.
+    """
+    cfg = load_config(dotlist=json.loads(os.environ.get("ER_LAB_DOTLIST", "[]")))
+    tier = os.environ.get("ER_LAB_TIER")
+    if tier is not None:
+        cfg.run.tier = tier
+    artifacts_root = os.environ.get("ER_LAB_ARTIFACTS")
+    if artifacts_root is not None:
+        cfg.paths.artifacts_root = artifacts_root
+    return cfg
 
 
 def config_hash(cfg: DictConfig) -> str:

@@ -2,63 +2,16 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
-import sys
 import textwrap
-import types
 
 import nbformat
 import pytest
 from omegaconf import OmegaConf
 
-
-def _ensure_config_module() -> None:
-    """Install a contract-shaped ``er_lab.config`` stand-in iff the real one is absent.
-
-    Creates no files: once the real module lands, the import succeeds and the
-    stand-in is never installed, so these tests keep exercising the real thing.
-    """
-    try:
-        import er_lab.config
-
-        return
-    except ImportError:
-        pass
-    import er_lab
-
-    stub = types.ModuleType("er_lab.config")
-    stub.__doc__ = "Test stand-in for the er_lab.config contract (real module not built yet)."
-
-    def config_hash(cfg) -> str:
-        return hashlib.sha256(OmegaConf.to_yaml(cfg, resolve=True).encode()).hexdigest()[:12]
-
-    def load_config(yaml_path=None, dotlist=None):
-        cfg = OmegaConf.create(
-            {
-                "run": {"tier": "smoke", "seed": 17, "seeds": [17, 23, 29], "name": "dev"},
-                "paths": {"data_root": "data", "artifacts_root": "artifacts", "hf_local": None},
-            }
-        )
-        if dotlist:
-            cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(list(dotlist)))
-        return cfg
-
-    def set_all_seeds(seed: int) -> None:
-        pass
-
-    stub.config_hash = config_hash
-    stub.load_config = load_config
-    stub.set_all_seeds = set_all_seeds
-    sys.modules["er_lab.config"] = stub
-    er_lab.config = stub
-
-
-_ensure_config_module()
-
 import er_lab.run as er_run
 from er_lab.infra import runner
-from er_lab.infra.artifacts import ArtifactMissing, ArtifactRegistry
+from er_lab.infra.artifacts import ArtifactMissing, ArtifactRegistry, TierMixingError
 
 
 def _write_notebook(path, sources) -> None:
@@ -130,25 +83,41 @@ def test_run_notebook_hard_fails_before_execution(tmp_path, monkeypatch):
     assert not marker.exists()  # the kernel never started
 
 
+def test_run_notebook_hard_fails_on_tier_mixing_before_execution(tmp_path, monkeypatch):
+    marker = tmp_path / "executed_marker.txt"
+    nb_path = tmp_path / "92_tier_mix_probe.ipynb"
+    _write_notebook(nb_path, [f"open({str(marker)!r}, 'w').write('ran')"])
+    monkeypatch.setitem(
+        runner.NOTEBOOK_DAG,
+        "92_tier_mix_probe.ipynb",
+        {"requires": ["calibrated_corpus"], "produces": []},
+    )
+    root = tmp_path / "artifacts"
+    cfg = OmegaConf.create({"run": {"seed": 17, "seeds": [17]}})
+    ArtifactRegistry(root).register("calibrated_corpus", {"v": 1}, cfg=cfg, tier="target")
+    with pytest.raises(TierMixingError):
+        runner.run_notebook(nb_path, "smoke", root)
+    assert not marker.exists()  # the kernel never started
+
+
+def test_run_notebook_rejects_unknown_tier_up_front(tmp_path):
+    with pytest.raises(ValueError, match="unknown tier"):
+        runner.run_notebook(tmp_path / "nb.ipynb", "smok", tmp_path / "artifacts")
+    with pytest.raises(ValueError, match="unknown tier"):
+        runner.run_all("node", notebooks_dir=tmp_path, artifacts_root=tmp_path / "artifacts")
+
+
+def test_run_notebook_names_a_missing_notebook_file(tmp_path):
+    with pytest.raises(FileNotFoundError) as exc:
+        runner.run_notebook(tmp_path / "99_missing.ipynb", "smoke", tmp_path / "artifacts")
+    assert "99_missing.ipynb" in str(exc.value)
+
+
 def test_run_notebook_injects_env_and_registers_artifact(tmp_path, monkeypatch):
     monkeypatch.delenv("ER_LAB_TIER", raising=False)
     monkeypatch.delenv("ER_LAB_ARTIFACTS", raising=False)
+    monkeypatch.delenv("ER_LAB_DOTLIST", raising=False)
 
-    # The stand-in mirrors _ensure_config_module for the *kernel* process; once
-    # the real er_lab.config lands, the try-import wins and it is inert.
-    stub_cell = textwrap.dedent(
-        """
-        import hashlib, sys, types
-        try:
-            import er_lab.config
-        except ImportError:
-            from omegaconf import OmegaConf
-            stub = types.ModuleType("er_lab.config")
-            stub.config_hash = lambda cfg: hashlib.sha256(
-                OmegaConf.to_yaml(cfg, resolve=True).encode()).hexdigest()[:12]
-            sys.modules["er_lab.config"] = stub
-        """
-    )
     register_cell = textwrap.dedent(
         """
         import os
@@ -162,19 +131,47 @@ def test_run_notebook_injects_env_and_registers_artifact(tmp_path, monkeypatch):
         """
     )
     nb_path = tmp_path / "90_env_probe.ipynb"
-    _write_notebook(nb_path, [stub_cell, register_cell])
+    _write_notebook(nb_path, [register_cell])
     root = tmp_path / "artifacts"
 
     runner.run_notebook(nb_path, "smoke", root)
 
     assert "ER_LAB_TIER" not in os.environ  # env restored after the run
     assert "ER_LAB_ARTIFACTS" not in os.environ
+    assert "ER_LAB_DOTLIST" not in os.environ
     payload, meta = ArtifactRegistry(root).load("env_probe", tier="smoke")
     assert payload == {"tier": "smoke", "root": str(root.resolve())}
     assert meta["tier"] == "smoke"
     assert meta["seed"] == 17
     executed = nbformat.read(str(nb_path), as_version=4)  # written back with outputs
     assert all(cell.execution_count is not None for cell in executed.cells)
+
+
+def test_run_notebook_forwards_dotlist_to_kernel_config(tmp_path, monkeypatch):
+    for var in ("ER_LAB_TIER", "ER_LAB_ARTIFACTS", "ER_LAB_DOTLIST"):
+        monkeypatch.delenv(var, raising=False)
+    cell = textwrap.dedent(
+        """
+        from er_lab.config import load_config_from_env
+        from er_lab.infra.artifacts import ArtifactRegistry
+        cfg = load_config_from_env()
+        ArtifactRegistry(cfg.paths.artifacts_root).register(
+            "cfg_probe",
+            {"batch_size": cfg.train.batch_size, "tier": cfg.run.tier},
+            cfg=cfg,
+            tier=cfg.run.tier,
+        )
+        """
+    )
+    nb_path = tmp_path / "93_cfg_probe.ipynb"
+    _write_notebook(nb_path, [cell])
+    root = tmp_path / "artifacts"
+
+    runner.run_notebook(nb_path, "smoke", root, dotlist=["train.batch_size=128"])
+
+    payload, meta = ArtifactRegistry(root).load("cfg_probe", tier="smoke")
+    assert payload == {"batch_size": 128, "tier": "smoke"}  # the override reached the kernel
+    assert meta["tier"] == "smoke"
 
 
 def test_run_all_fails_on_missing_notebook_file(tmp_path):
@@ -209,3 +206,12 @@ def test_parse_argv_rejects_bare_tokens():
         er_run.parse_argv(["notebook05"])
     with pytest.raises(SystemExit):
         er_run.parse_argv(["=smoke"])
+
+
+def test_unknown_toplevel_section_warns_but_known_ones_do_not(capsys):
+    er_run._warn_unknown_sections(["trian.batch_size=999", "train.batch_size=64", "a.b=c"])
+    err = capsys.readouterr().err
+    assert "WARNING" in err
+    assert "'trian.batch_size=999'" in err  # section typo flagged
+    assert "'a.b=c'" in err  # unknown extension prefix flagged (still merged)
+    assert "'train.batch_size=64'" not in err  # known section stays quiet

@@ -42,6 +42,11 @@ def test_unknown_device_raises():
         resolve_device(_cfg(device="tpu"))
 
 
+def test_multi_gpu_refuses_to_silently_noop():
+    with pytest.raises(NotImplementedError, match="infra.multi_gpu"):
+        resolve_device(_cfg(multi_gpu="true"))
+
+
 # The precision policy table. torch.device objects are plain descriptors, so the
 # cuda/mps rows are exercised even on this CPU-only box.
 @pytest.mark.parametrize(

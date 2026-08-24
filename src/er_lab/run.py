@@ -8,9 +8,10 @@ every other token is merged into the config as an OmegaConf dotlist override.
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 
-from er_lab.config import load_config
+from omegaconf import OmegaConf
+
+from er_lab.config import DEFAULT_YAML, LabConfig, load_config
 from er_lab.infra import runner
 
 USAGE = (
@@ -35,18 +36,37 @@ def parse_argv(argv: list[str]) -> tuple[str | None, list[str]]:
     return nb, dotlist
 
 
+def _warn_unknown_sections(dotlist: list[str]) -> None:
+    """Loud stderr warning for dotlist tokens whose top-level section nothing declares.
+
+    The token still merges — extension keys are part of the contract — but a
+    typo'd section name ('trian.batch_size=128') must not pass silently.
+    """
+    known = set(LabConfig.__dataclass_fields__) | set(OmegaConf.load(DEFAULT_YAML).keys())
+    for token in dotlist:
+        top = token.partition("=")[0].partition(".")[0]
+        if top not in known:
+            print(
+                f"er_lab.run: WARNING: {token!r} does not touch any known config section "
+                f"({', '.join(sorted(known))}); merging it as an extension key — check "
+                "for a typo if you meant a built-in one.",
+                file=sys.stderr,
+            )
+
+
 def main(argv: list[str] | None = None) -> None:
     nb, dotlist = parse_argv(sys.argv[1:] if argv is None else argv)
     if nb is None:
         raise SystemExit(USAGE)
+    _warn_unknown_sections(dotlist)
     cfg = load_config(dotlist=dotlist)
     tier = cfg.run.tier
     artifacts_root = cfg.paths.artifacts_root
     if nb == "all":
-        runner.run_all(tier, artifacts_root=artifacts_root)
+        runner.run_all(tier, artifacts_root=artifacts_root, dotlist=dotlist)
     else:
         name = runner.resolve_notebook(nb)
-        runner.run_notebook(Path(runner.NOTEBOOKS_DIR) / name, tier, artifacts_root)
+        runner.run_notebook(runner.NOTEBOOKS_DIR / name, tier, artifacts_root, dotlist=dotlist)
 
 
 if __name__ == "__main__":

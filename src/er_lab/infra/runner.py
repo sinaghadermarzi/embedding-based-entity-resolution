@@ -2,15 +2,18 @@
 
 ``NOTEBOOK_DAG`` declares, in series order, which registered artifacts each
 notebook requires and produces (PLAN §6). ``run_notebook`` executes one
-notebook via nbclient with ``ER_LAB_TIER`` / ``ER_LAB_ARTIFACTS`` injected into
-the kernel environment — and hard-fails *before* starting the kernel, with the
-'not yet run' placard, if a required upstream artifact is missing for that
-tier. One code path across tiers: the tier only ever changes via config/env,
-never via forked notebook logic.
+notebook via nbclient with ``ER_LAB_TIER`` / ``ER_LAB_ARTIFACTS`` /
+``ER_LAB_DOTLIST`` (the CLI overrides, as JSON — consumed by
+``er_lab.config.load_config_from_env``) injected into the kernel environment —
+and hard-fails *before* starting the kernel, with the 'not yet run' placard,
+if a required upstream artifact is missing for that tier. One code path across
+tiers: the tier only ever changes via config/env, never via forked notebook
+logic.
 """
 
 from __future__ import annotations
 
+import json
 import os
 from contextlib import contextmanager
 from pathlib import Path
@@ -18,9 +21,10 @@ from pathlib import Path
 import nbformat
 from nbclient import NotebookClient
 
-from er_lab.infra.artifacts import ArtifactMissing, ArtifactRegistry
+from er_lab.config import REPO_ROOT
+from er_lab.infra.artifacts import ArtifactMissing, ArtifactRegistry, check_tier
 
-NOTEBOOKS_DIR = Path("notebooks")
+NOTEBOOKS_DIR = REPO_ROOT / "notebooks"
 
 # Series order is execution order (dicts preserve insertion order).
 NOTEBOOK_DAG: dict[str, dict[str, list[str]]] = {
@@ -155,28 +159,41 @@ def run_notebook(
     nb_path: str | Path,
     tier: str,
     artifacts_root: str | Path,
+    dotlist: list[str] | None = None,
     *,
     cell_timeout: int = 1800,
 ) -> None:
     """Execute *nb_path* headlessly at *tier*, gated on its upstream artifacts.
 
+    *dotlist* (the CLI config overrides) is forwarded to the kernel as JSON in
+    ``ER_LAB_DOTLIST``; notebooks apply it via ``load_config_from_env()``.
     Notebooks not listed in ``NOTEBOOK_DAG`` (scratch/test notebooks) run
-    ungated. The executed notebook, with outputs, is written back in place.
+    ungated. The executed notebook is written back in place even when a cell
+    fails, so partial outputs and the traceback are preserved for debugging.
     """
-    nb_path = Path(nb_path)
-    root = Path(artifacts_root).resolve()
+    check_tier(tier)
+    nb_path = _anchor(nb_path)
+    root = _anchor(artifacts_root).resolve()
+    if not nb_path.is_file():
+        raise FileNotFoundError(f"notebook {nb_path} does not exist (not built yet?)")
     _check_requires(NOTEBOOK_DAG.get(nb_path.name, {}).get("requires", []), tier, root)
 
     nb = nbformat.read(str(nb_path), as_version=4)
-    with _injected_env(ER_LAB_TIER=tier, ER_LAB_ARTIFACTS=str(root)):
+    with _injected_env(
+        ER_LAB_TIER=tier,
+        ER_LAB_ARTIFACTS=str(root),
+        ER_LAB_DOTLIST=json.dumps(list(dotlist or [])),
+    ):
         client = NotebookClient(
             nb,
             timeout=cell_timeout,
             kernel_name="python3",
             resources={"metadata": {"path": str(nb_path.parent)}},
         )
-        client.execute()
-    nbformat.write(nb, str(nb_path))
+        try:
+            client.execute()
+        finally:
+            nbformat.write(nb, str(nb_path))
 
 
 def run_all(
@@ -185,16 +202,22 @@ def run_all(
     *,
     notebooks_dir: str | Path = NOTEBOOKS_DIR,
     artifacts_root: str | Path = "artifacts",
+    dotlist: list[str] | None = None,
 ) -> None:
     """Run the series in DAG order, through *upto* (number or name) inclusive."""
+    check_tier(tier)
     stop = None if upto is None else resolve_notebook(upto)
+    notebooks_dir = _anchor(notebooks_dir)
     for nb_name in NOTEBOOK_DAG:
-        nb_path = Path(notebooks_dir) / nb_name
-        if not nb_path.is_file():
-            raise FileNotFoundError(f"notebook {nb_path} does not exist (not built yet?)")
-        run_notebook(nb_path, tier, artifacts_root)
+        run_notebook(notebooks_dir / nb_name, tier, artifacts_root, dotlist=dotlist)
         if nb_name == stop:
             break
+
+
+def _anchor(path: str | Path) -> Path:
+    """Absolute paths pass through; relative ones anchor at the repo root, not the CWD."""
+    path = Path(path)
+    return path if path.is_absolute() else REPO_ROOT / path
 
 
 def _check_requires(requires: list[str], tier: str, root: Path) -> None:

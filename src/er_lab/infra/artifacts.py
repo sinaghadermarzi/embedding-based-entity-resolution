@@ -15,6 +15,8 @@ naming the producing notebook.
 from __future__ import annotations
 
 import json
+import os
+import re
 import subprocess
 import time
 from datetime import UTC, datetime
@@ -29,6 +31,7 @@ from er_lab.config import config_hash
 TIERS = ("smoke", "mid", "target", "analytical")
 
 _META = "meta.json"
+_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_\-]*")
 
 
 class ArtifactMissing(FileNotFoundError):
@@ -87,7 +90,8 @@ class ArtifactRegistry:
         an ISO-8601 UTC timestamp, and ``run.seed`` / ``run.seeds`` from *cfg*;
         *meta* is stored verbatim under the ``extra`` key.
         """
-        _check_tier(tier)
+        check_tier(tier)
+        _check_name(name)
         if not OmegaConf.is_config(cfg):
             cfg = OmegaConf.create(cfg)
         run_dir = self._new_run_dir(name, tier)
@@ -104,25 +108,43 @@ class ArtifactRegistry:
             "payload": payload_file,
             "extra": meta or {},
         }
-        # meta.json last: its presence marks the run directory as complete.
-        (run_dir / _META).write_text(json.dumps(sidecar, indent=2))
+        # meta.json last and atomically: its presence marks the run directory
+        # as complete, so a crash mid-write must not leave a truncated sidecar.
+        tmp = run_dir / (_META + ".tmp")
+        tmp.write_text(json.dumps(sidecar, indent=2))
+        os.replace(tmp, run_dir / _META)
         return run_dir
 
     def load(self, name: str, *, tier: str) -> tuple[Any, dict]:
-        """Return ``(payload, meta)`` of the newest run of *name*, which must be of *tier*."""
+        """Return ``(payload, meta)`` of the *newest* run of *name*, which must be of *tier*.
+
+        Only the newest run counts — an older right-tier run behind a newer
+        wrong-tier one raises :class:`TierMixingError`. :meth:`exists` mirrors
+        exactly these semantics.
+        """
         run_dir, meta = self._newest_run(name, tier)
         return _read_payload(run_dir / meta["payload"]), meta
 
     def exists(self, name: str, *, tier: str) -> bool:
-        """True iff at least one complete run of *name* is registered under *tier*."""
-        _check_tier(tier)
-        return any(_read_meta(run)["tier"] == tier for run in self._runs(name))
+        """True iff the *newest* complete run of *name* is of *tier* — mirrors :meth:`load`.
+
+        Like ``load``, this looks only at the newest run, so an exists-gated
+        rebuild resolves a tier mix instead of skipping the rebuild and dying
+        at load time. Use :meth:`newest_tier` to inspect what is actually there.
+        """
+        check_tier(tier)
+        return self.newest_tier(name) == tier
+
+    def newest_tier(self, name: str) -> str | None:
+        """Tier of the newest complete run of *name*, or None if there are no runs."""
+        runs = self._runs(name)
+        return _read_meta(runs[-1])["tier"] if runs else None
 
     # -- internals ---------------------------------------------------------
 
     def _newest_run(self, name: str, tier: str) -> tuple[Path, dict]:
         """Newest run dir + meta for *name*, enforcing the no-tier-mixing rule."""
-        _check_tier(tier)
+        check_tier(tier)
         runs = self._runs(name)
         if not runs:
             raise ArtifactMissing(missing_placard(name, tier, self.root))
@@ -139,6 +161,7 @@ class ArtifactRegistry:
 
     def _runs(self, name: str) -> list[Path]:
         """Complete run directories of *name*, oldest first (dir names sort by timestamp)."""
+        _check_name(name)
         base = self.root / name
         if not base.is_dir():
             return []
@@ -160,9 +183,18 @@ def _stamp(ts_ns: int, tier: str) -> str:
     return f"{sec:%Y%m%dT%H%M%S}.{ts_ns % 1_000_000_000:09d}Z_{tier}"
 
 
-def _check_tier(tier: str) -> None:
+def check_tier(tier: str) -> None:
+    """Raise ValueError unless *tier* is one of the known ``TIERS``."""
     if tier not in TIERS:
         raise ValueError(f"unknown tier {tier!r}; expected one of {TIERS}")
+
+
+def _check_name(name: str) -> None:
+    if not isinstance(name, str) or not _NAME_RE.fullmatch(name):
+        raise ValueError(
+            f"invalid artifact name {name!r}: must match {_NAME_RE.pattern!r} "
+            "(names are used as registry path components)"
+        )
 
 
 def _write_payload(run_dir: Path, payload: Any) -> str:
@@ -185,7 +217,12 @@ def _read_payload(path: Path) -> Any:
 
 
 def _read_meta(run_dir: Path) -> dict:
-    return json.loads((run_dir / _META).read_text())
+    try:
+        return json.loads((run_dir / _META).read_text())
+    except json.JSONDecodeError as err:
+        raise json.JSONDecodeError(
+            f"corrupt meta.json in run directory {run_dir}: {err.msg}", err.doc, err.pos
+        ) from err
 
 
 def _as_list(value: Any) -> list | None:
@@ -211,6 +248,6 @@ def _git_rev() -> str | None:
             timeout=10,
             check=False,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return None
     return out.stdout.strip() if out.returncode == 0 else None

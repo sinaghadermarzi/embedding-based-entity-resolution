@@ -20,8 +20,11 @@ def resolve_device(cfg: DictConfig) -> torch.device:
 
     An explicitly requested backend that is unavailable raises RuntimeError
     rather than silently falling back — tier results must come from the tier's
-    declared hardware.
+    declared hardware. ``infra.multi_gpu`` has no consumer yet and refuses to
+    silently no-op.
     """
+    if cfg.infra.get("multi_gpu", False):
+        raise NotImplementedError("infra.multi_gpu: accelerate path lands with the training loop")
     choice = str(cfg.infra.device).lower()
     if choice == "auto":
         if torch.cuda.is_available():

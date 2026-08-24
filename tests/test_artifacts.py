@@ -2,59 +2,12 @@
 
 from __future__ import annotations
 
-import hashlib
 import re
-import sys
-import types
 from datetime import datetime
 
 import pandas as pd
 import pytest
 from omegaconf import OmegaConf
-
-
-def _ensure_config_module() -> None:
-    """Install a contract-shaped ``er_lab.config`` stand-in iff the real one is absent.
-
-    Creates no files: once the real module lands, the import succeeds and the
-    stand-in is never installed, so these tests keep exercising the real thing.
-    """
-    try:
-        import er_lab.config
-
-        return
-    except ImportError:
-        pass
-    import er_lab
-
-    stub = types.ModuleType("er_lab.config")
-    stub.__doc__ = "Test stand-in for the er_lab.config contract (real module not built yet)."
-
-    def config_hash(cfg) -> str:
-        return hashlib.sha256(OmegaConf.to_yaml(cfg, resolve=True).encode()).hexdigest()[:12]
-
-    def load_config(yaml_path=None, dotlist=None):
-        cfg = OmegaConf.create(
-            {
-                "run": {"tier": "smoke", "seed": 17, "seeds": [17, 23, 29], "name": "dev"},
-                "paths": {"data_root": "data", "artifacts_root": "artifacts", "hf_local": None},
-            }
-        )
-        if dotlist:
-            cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(list(dotlist)))
-        return cfg
-
-    def set_all_seeds(seed: int) -> None:
-        pass
-
-    stub.config_hash = config_hash
-    stub.load_config = load_config
-    stub.set_all_seeds = set_all_seeds
-    sys.modules["er_lab.config"] = stub
-    er_lab.config = stub
-
-
-_ensure_config_module()
 
 from er_lab.infra.artifacts import (
     ArtifactMissing,
@@ -140,6 +93,20 @@ def test_exists_is_tier_scoped(registry, cfg):
     assert not registry.exists("met07_splits", tier="target")
 
 
+def test_exists_mirrors_load_newest_run_semantics(registry, cfg):
+    registry.register("met07_splits", {"v": "smoke"}, cfg=cfg, tier="smoke")
+    registry.register("met07_splits", {"v": "target"}, cfg=cfg, tier="target")
+    # exists answers the same question as load: only the newest run counts, so
+    # an exists-gated rebuild resolves the mix instead of dying at load time.
+    assert registry.exists("met07_splits", tier="target")
+    assert not registry.exists("met07_splits", tier="smoke")
+    assert registry.newest_tier("met07_splits") == "target"
+
+
+def test_newest_tier_is_none_without_runs(registry):
+    assert registry.newest_tier("met07_splits") is None
+
+
 def test_tier_mixing_rejected(registry, cfg):
     registry.register("met07_splits", {"v": "smoke"}, cfg=cfg, tier="smoke")
     with pytest.raises(TierMixingError):
@@ -168,3 +135,19 @@ def test_unknown_tier_rejected(registry, cfg):
         registry.register("x", {"a": 1}, cfg=cfg, tier="smok")
     with pytest.raises(ValueError):
         registry.exists("x", tier="node")
+
+
+def test_invalid_artifact_name_rejected(registry, cfg):
+    for bad in ("../escape", "a/b", "", ".hidden", "spaced name"):
+        with pytest.raises(ValueError, match="invalid artifact name"):
+            registry.register(bad, {"v": 1}, cfg=cfg, tier="smoke")
+        with pytest.raises(ValueError, match="invalid artifact name"):
+            registry.exists(bad, tier="smoke")
+    assert not (registry.root.parent / "escape").exists()  # nothing escaped the root
+
+
+def test_corrupt_meta_error_names_the_run_dir(registry, cfg):
+    run_dir = registry.register("met07_splits", {"v": 1}, cfg=cfg, tier="smoke")
+    (run_dir / "meta.json").write_text('{"tier": "smo')  # simulate a torn write
+    with pytest.raises(ValueError, match=re.escape(str(run_dir))):
+        registry.load("met07_splits", tier="smoke")
