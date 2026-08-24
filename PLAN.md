@@ -35,7 +35,9 @@ extrapolation.
 ## 2. Task shape and scale tiers
 
 - **Primary task:** deduplication within one corpus under a *declared schema* (column→role mapping).
-  Two-source linkage appears once, as an adaptation arm (ADP-01).
+  Two-source linkage appears in one adaptation chapter (notebook 18): ADP-01 converts the pipeline
+  to linkage mode (ONC; BPID fallback), and ADP-02 exercises that mode once at target tier as an
+  NC↔OH cross-state arm.
 - **Tiers:** `smoke` (1e5–1e6 records; runs live on a 4-CPU/15GB container, CPU-only) → `mid`
   (~1e6; one GPU or Apple Silicon) → `target` (~1e7 max live) → `analytical` (1e8–1e9 by validated
   extrapolation + cost/ambiguity modeling only). A `# [RUN-IN-TARGET]` cell is the *same cell* with
@@ -75,6 +77,7 @@ Tier = where the definitive run happens. EXPL = exploratory arm (cheap, clearly 
 | EFF-01 | MRL truncation × {fp16, int8, binary+rescore, IVF-PQ} on **ER metrics** (not nDCG), with PCA-truncation control | mid→target |
 | FAIR-01 | Under measured group-correlated exposure: net-positive on BOTH missed-match AND false-match disparity per group, at matched operating points, with demographic-label-error robustness bands | mid→target |
 | ADP-01 | Adapt the full pipeline to a new declared schema (ONC; BPID fallback) + dedup→linkage conversion; lines-of-config-changed metric | mid |
+| ADP-02 | The linkage mode at target tier: NC↔OH cross-state linkage with the ADP-01-ported pipeline; full-DOB (OH) vs no-DOB (NC) identifiability contrast in the linked setting | target |
 | PRS-01 · EXPL | Does upstream parsing/standardization level change the embeddings-vs-rules ranking? 2×2 factorial | mid |
 | EFF-02 · EXPL | Static-distilled encoder (~100× cheaper inference): tolerable person-ER blocking quality? | mid |
 | X01 · EXPL | Marginal value per dollar of a small cross-encoder reranker over embedding retrieval | mid |
@@ -82,8 +85,32 @@ Tier = where the definitive run happens. EXPL = exploratory arm (cheap, clearly 
 | X03 · EXPL | Leakage probe of trained embeddings (attribute inference; tail-entity membership inference) → feeds the release-policy memo | mid |
 
 **Pruning:** MET-04's power table is binding. Protected-arm priority when compute forces cuts:
-TRN-02 > TRN-03 chain > TRN-04 > TRN-01 > TRN-05/06. Fractional-factorial alias structure is locked
-at sign-off (§10).
+TRN-02 > TRN-03 chain > TRN-04 > TRN-01 > TRN-05/06. Factor sets are locked in §3.1; any
+fractionalization follows the pre-registered rule in §10.1, with the chosen alias table rendered in
+the notebook *before* the affected runs execute.
+
+### 3.1 Locked factor sets (full factorial unless the §10.1 rule triggers)
+
+- **TRN-01:** loss {InfoNCE, SupCon, triplet, CoSENT} × encoder regime {pretrained-subword,
+  scratch-char/byte} — 8 cells.
+- **TRN-02:** miner {in-batch, BM25-mined, ANN-mined, ANN + cluster-aware FN filter} × residual
+  duplication rate {low, medium, high} — 12 cells.
+- **TRN-03:** augmentation {none, generic typo, calibrated channels} × encoder regime — 6 cells,
+  plus a dose–response dial on calibrated-augmentation rate within the winning cell (for the
+  mediation analysis, §5).
+- **TRN-04:** carried as the encoder-regime factor inside TRN-01/02/03, plus one dedicated
+  matched-budget head-to-head at each regime's own winning training recipe — 2 cells.
+- **TRN-05:** serialization {[COL]/[VAL], template, JSON, bare} × missing-field treatment
+  {[MISSING] token, drop} — 8 cells; field-order sensitivity is an evaluation-time probe, not a
+  training factor.
+- **TRN-06:** nickname supervision {off, lexicon pairs} — 2 cells, scored on the nickname slice AND
+  the twin/Jr-Sr must-not-merge slice.
+- **Cross-pressure interaction study** (the only anticipated fractionalization site): winning
+  levels of TRN-01/02/03/05 in a 2⁴ factorial at mid tier; if MET-04's power table rules the full
+  factorial unaffordable, a resolution-IV 2⁴⁻¹ half fraction per §10.1.
+
+Every cell runs with ≥3–5 seeds × noise draws per MET-04; all cells share replicate sets for paired
+comparison.
 
 ## 4. Data sources and roles
 
@@ -96,7 +123,7 @@ The repo ships **download scripts + checksums, never data**. Per-source terms li
 | **Own corruption generator** (wraps Gecko + household/hub/raw-form channels) | Primary controlled-experiment substrate; prevalence calibrated from NSE-01; group-correlated exposure model | Perfect labels by construction; realism validated by NSE-02 acceptance criteria (collision mass, Zipf tail, block-size distribution, diff-mix divergence) |
 | **BPID** (Zenodo 13932202, Apache-2.0; 1M synthetic PII profiles + 10k labeled pairs) | Independent benchmark arm; its corruption model scored in NSE-02; ADP-01 fallback target | User-side download (host blocked from build sandbox) |
 | **ONC patient-matching** (1M records, full DOB+SSN) | ADP-01 primary adaptation target (different schema); full-DOB identifiability contrast | No license file → research-use only, no redistribution; answer key absent → within-lab labels only |
-| **Ohio voter file** (full DOB, statewide key) | Full-DOB collision calibration (SCL-04); NC↔OH cross-state linkage arm at target tier | User-side download. Florida: explicitly out (request lead time, no core dependency) |
+| **Ohio voter file** (full DOB, statewide key) | Full-DOB collision calibration (SCL-04); the ADP-02 NC↔OH linkage arm | User-side download. Florida: explicitly out (request lead time, no core dependency) |
 | **pseudopeople** (10k sample bundled; 1M/330M IHME-gated) | Noise-channel audit in NSE-02; large populations only if access granted (§10 decision) | Column noise independent of attributes — structurally cannot express group-correlated exposure; used accordingly |
 | **splink_datasets** (`fake_1000`, `historical_50k`) | Notebook-00 quickstart corpus; CI fixtures | Fetchable live from the build sandbox |
 | **Nickname lexicons** (carltonnorthern, diminutives.db) | TRN-06 supervision; battery probes | English-centric with documented provenance bias — limitation carried on every affected claim |
@@ -121,8 +148,16 @@ The repo ships **download scripts + checksums, never data**. Per-source terms li
   the labeling widget); identifiability conditioning per MET-06 — every headline figure reports the
   unresolvable fraction.
 - **Conjecture cards:** rendered before each training run, never edited after; verdict boxes
-  (CONFIRMED / REFUTED / UNEXPLAINED); a pressure is *adopted* only if the targeted property AND the
-  system metric move with CIs excluding zero.
+  (CONFIRMED / REFUTED / UNEXPLAINED).
+- **Adoption gate vs mediation claim (two distinct tests).** The *adoption gate* is deliberately
+  conservative: a pressure is adopted only if the targeted embedding property AND the system metric
+  both move with CIs excluding zero. This is necessary evidence, and *not* evidence of mediation —
+  both can move for independent reasons. The *mediation claim* is tested separately, across
+  arms × seeds × noise draws: indirect-effect estimation for pressure → property → metric
+  (product-of-paths a·b with entity-bootstrap CIs), a conditioning check (does the pressure→metric
+  effect shrink when controlling for the property), and dose–response where the pressure has a dial
+  (e.g., augmentation rate). A pressure can be adopted with mediation UNEXPLAINED — the verdict box
+  then says exactly that; the two marginal effects are never reported as mediation.
 
 ## 6. Notebook series (~18 + appendix)
 
@@ -149,7 +184,7 @@ verdict boxes at the end. Figures render only from registered artifacts.
 | 15 | The Last Two Orders of Magnitude | SCL-01/02 ladder + EVT/hubness; EFF-01; SCL-03 cost model; SCL-04 ambiguity budget; MEASURED-vs-EXTRAPOLATED visual convention |
 | 16 | Unequal Noise, Unequal Errors | FAIR-01 both-sides disparity; exposure-vs-mechanism decomposition; label-error robustness bands |
 | 17 | The Verdict at 1e7 | Headline hybrid-vs-FS-vs-pure comparison under full protocol; honesty audit |
-| 18 | Your Data, Your Schema | ADP-01 adaptation walkthrough (ONC), audit re-calibration, battery as acceptance test, linkage mode |
+| 18 | Your Data, Your Schema | ADP-01 adaptation walkthrough (ONC), audit re-calibration, battery as acceptance test; linkage mode incl. the ADP-02 NC↔OH target-tier arm |
 | A | Appendix: Exploratory Arms | X01 / X02 / X03 / EFF-02; negative results; all labeled exploratory |
 
 ## 7. Package and infrastructure
@@ -186,7 +221,7 @@ in CI); cross-backend reproducibility policy with stated per-metric tolerances (
 
 ## 9. Scope decisions (the guards)
 
-**In:** dedup primary + one linkage arm; all four noise axes with measured prevalence; both model
+**In:** dedup primary + one linkage chapter (ADP-01 conversion, ADP-02 target arm); all four noise axes with measured prevalence; both model
 regimes head-to-head; sparse-vs-dense adjudication; fairness as measurement-with-robustness-bands
 (deliberately not the headline); privacy as one exploratory probe + release-policy memo; US/English
 resources with the limitation stated on every affected claim.
@@ -201,12 +236,17 @@ data; production serving concerns beyond the X02 ID-churn probe.
 
 Approving this plan locks:
 
-1. The experiment matrix (§3) with its protected-arm priority; fractional-factorial alias structures
-   are fixed here and only revisited if MET-04's power table forces it.
+1. The experiment matrix (§3) with its protected-arm priority and the §3.1 factor sets.
+   **Fractionalization rule (pre-registered):** a factor set may be fractionated only if MET-04's
+   power table shows the full factorial cannot reach the required power within the compute budget;
+   any fraction must be resolution ≥ IV, must leave all main effects and the two named interactions
+   of interest (loss × encoder-regime, augmentation × encoder-regime) unaliased, and its alias table
+   is rendered in the notebook before the affected runs execute — never chosen after results are
+   seen.
 2. Operating-point defaults: entity-precision {0.99, 0.995} + cost grid {1:1, 1:10, 1:100};
    fixed-FP-budget secondary at scale tiers.
 3. Data commitments: NC (audit + gated truth arms), own generator, BPID (user downloads), ONC
-   (adaptation), Ohio (user downloads; SCL-04 + linkage arm). Florida out.
+   (adaptation), Ohio (user downloads; SCL-04 + ADP-02). Florida out.
 4. Adjudication: user labels ~200–500 stratified pairs via the shipped widget at target tier.
 5. **Open decision to make at sign-off:** file the pseudopeople IHME data-access request now
    (unlocks a 330M-simulant extrapolation cross-check later; no core dependency) — yes or no?
