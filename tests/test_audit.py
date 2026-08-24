@@ -22,6 +22,8 @@ NA = pd.NA
 
 def aligned() -> pd.DataFrame:
     """11 pairs covering every category (fields: given_name, family_name, phone)."""
+    # the lists are positionally aligned columns; keep each on one line
+    # fmt: off
     return pd.DataFrame(
         {
             "ncid": [f"r{i:02d}" for i in range(1, 12)],
@@ -33,28 +35,29 @@ def aligned() -> pd.DataFrame:
             "phone_b": [NA, "5551", "111", "111", "111", "222", "333", "9195551212", "444", "555", "666"],
         }
     )
+    # fmt: on
 
 
 EXPECTED = {
     "given_name": {
-        "r01": "identical",     # verbatim equal
+        "r01": "identical",  # verbatim equal
         "r02": "missing_gain",  # NA -> value
         "r03": "identical",
         "r04": "identical",
         "r05": "identical",
-        "r06": "nickname",      # Bill <-> William via lexicon
-        "r07": "swap",          # given<->family exchanged
+        "r06": "nickname",  # Bill <-> William via lexicon
+        "r07": "swap",  # given<->family exchanged
         "r08": "identical",
         "r09": "identical",
-        "r10": "wholesale",     # unrelated values
-        "r11": "typo",          # smith vs SMYTH: case-insensitive distance 1
+        "r10": "wholesale",  # unrelated values
+        "r11": "typo",  # smith vs SMYTH: case-insensitive distance 1
     },
     "family_name": {
         "r01": "identical",
         "r02": "missing_loss",  # value -> '' (blank counts as missing)
-        "r03": "typo",          # SMITH vs SMYTH: distance 1
-        "r04": "typo",          # SMITH vs SMYTHE: distance exactly 2 (boundary in)
-        "r05": "wholesale",     # SMITH vs SMYTHES: distance 3 (boundary out)
+        "r03": "typo",  # SMITH vs SMYTH: distance 1
+        "r04": "typo",  # SMITH vs SMYTHE: distance exactly 2 (boundary in)
+        "r05": "wholesale",  # SMITH vs SMYTHES: distance 3 (boundary out)
         "r06": "identical",
         "r07": "swap",
         "r08": "identical",
@@ -63,7 +66,7 @@ EXPECTED = {
         "r11": "identical",
     },
     "phone": {
-        "r01": "identical",     # missing on both sides
+        "r01": "identical",  # missing on both sides
         "r02": "identical",
         "r03": "identical",
         "r04": "identical",
@@ -106,6 +109,40 @@ def test_nickname_needs_lexicon() -> None:
     got = as_map(classify_pair_diffs(aligned(), fields=["given_name"]))
     # Bill vs William: distance > 2 and no lexicon -> wholesale, never nickname
     assert got[("given_name", "r06")] == "wholesale"
+
+
+def test_nickname_variant_variant_pairs_share_class() -> None:
+    """Variant<->variant pairs are nickname via the canonical-class closure,
+    not typo (bill<->will, distance 1) or wholesale (billy<->liam)."""
+    lex = {"william": {"bill", "will", "billy", "liam"}}
+    df = pd.DataFrame(
+        {
+            "ncid": ["p1", "p2"],
+            "given_name_a": ["BILL", "BILLY"],
+            "given_name_b": ["WILL", "LIAM"],
+        }
+    )
+    got = as_map(classify_pair_diffs(df, fields=["given_name"], lexicon=lex))
+    assert got[("given_name", "p1")] == "nickname"
+    assert got[("given_name", "p2")] == "nickname"
+
+
+def test_format_drift_date_reformat_and_abbreviation() -> None:
+    """Date re-formats and USPS abbreviations are drift; different content is not."""
+    df = pd.DataFrame(
+        {
+            "ncid": ["p1", "p2", "p3"],
+            "dob_a": ["1985-03-04", "1985-03-04", NA],
+            "dob_b": ["03/04/1985", "07/22/1991", NA],
+            "street_a": ["MAIN STREET", NA, "OAK AVENUE"],
+            "street_b": ["MAIN ST", NA, "ELM AVENUE"],
+        }
+    )
+    got = as_map(classify_pair_diffs(df, fields=["dob", "street"]))
+    assert got[("dob", "p1")] == "format_drift"  # same calendar date, new format
+    assert got[("dob", "p2")] == "wholesale"  # genuinely different dates
+    assert got[("street", "p1")] == "format_drift"  # USPS long <-> short
+    assert got[("street", "p3")] == "wholesale"  # different street, same suffix
 
 
 def test_classify_is_deterministic() -> None:
@@ -182,7 +219,13 @@ def test_audit_report_by_group_breakdown() -> None:
     df["county_a"] = pd.Series(["07"] * 6 + ["92"] * 5, dtype="string")
     report = audit_report(df, FIELDS, lexicon=LEXICON, by=["county_a"])
     assert list(report.columns) == [
-        "field", "category", "county_a", "n", "rate", "ci_low", "ci_high",
+        "field",
+        "category",
+        "county_a",
+        "n",
+        "rate",
+        "ci_low",
+        "ci_high",
     ]
     # every pair lands in exactly one category per field, per group
     per_group = report.groupby(["field", "county_a"], observed=True)["n"].sum()

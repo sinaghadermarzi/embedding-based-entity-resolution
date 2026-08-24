@@ -44,9 +44,7 @@ def test_from_table_matches_int_coded_groups_as_strings() -> None:
 
 
 def test_two_group_columns() -> None:
-    table = pd.DataFrame(
-        {"race": ["A", "A"], "sex": ["F", "M"], "multiplier": [1.5, 0.5]}
-    )
+    table = pd.DataFrame({"race": ["A", "A"], "sex": ["F", "M"], "multiplier": [1.5, 0.5]})
     model = ExposureModel.from_table(table)
     df = pd.DataFrame(
         {
@@ -96,9 +94,7 @@ def test_from_table_validation_errors() -> None:
     with pytest.raises(ValueError, match="group column"):
         ExposureModel.from_table(pd.DataFrame({"multiplier": [1.0]}))
     with pytest.raises(ValueError, match="duplicate"):
-        ExposureModel.from_table(
-            pd.DataFrame({"race": ["A", "A"], "multiplier": [1.0, 2.0]})
-        )
+        ExposureModel.from_table(pd.DataFrame({"race": ["A", "A"], "multiplier": [1.0, 2.0]}))
     with pytest.raises(ValueError, match="non-missing"):
         ExposureModel.from_table(pd.DataFrame({"race": [None], "multiplier": [1.0]}))
     with pytest.raises(ValueError, match=">= 0"):
@@ -127,6 +123,4 @@ def test_missing_group_column_raises() -> None:
 def test_per_record_rates_deterministic() -> None:
     model = ExposureModel.from_table(race_table())
     df = records()
-    pd.testing.assert_series_equal(
-        model.per_record_rates(df, 0.1), model.per_record_rates(df, 0.1)
-    )
+    pd.testing.assert_series_equal(model.per_record_rates(df, 0.1), model.per_record_rates(df, 0.1))

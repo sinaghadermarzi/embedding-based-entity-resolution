@@ -24,7 +24,15 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 
-from er_lab.noise.channels import CHANNELS, Channel, match_case, ops_frame, parse_dob
+from er_lab.noise.channels import (
+    CHANNELS,
+    Channel,
+    cell_eq,
+    get_cell,
+    match_case,
+    ops_frame,
+    parse_dob,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - exposure is an optional collaborator
     from er_lab.noise.exposure import ExposureModel
@@ -86,8 +94,12 @@ def generate_corpus(
     record_id (originals get the same resolution, so clusters share one id).
     Each duplicate then passes through each channel in ``channel_rates``
     insertion order at that channel's rate — turned into per-record rates by
-    ``exposure.per_record_rates(dup_df, rate)`` when an exposure model is given
-    (group-correlated exposure), else uniform.
+    ``exposure.per_record_rates(pristine_dup_df, rate)`` when an exposure model
+    is given (group-correlated exposure), else uniform. Exposure is generative
+    (keyed on the entity's true group), so every channel's rate vector is
+    computed from the PRISTINE duplicate frame before any channel runs: an
+    earlier channel dropping a group cell (e.g. field_dropout blanking race)
+    never attenuates a later channel's exposure-adjusted rate.
 
     The corpus is originals (each kept with probability ``keep_original_rate``)
     + duplicates, deterministically shuffled; the ops log concatenates all
@@ -121,13 +133,20 @@ def generate_corpus(
         )
 
     resolved = _resolve_channels(channel_rates, channels)
+    # Exposure is generative: rate vectors come from the PRISTINE dup frame, so a
+    # channel that mutates a group column cannot bias later channels' rates.
+    # per_record_rates draws no randomness, so the rng draw order is unchanged.
+    rate_vectors = {
+        name: (
+            exposure.per_record_rates(dup, float(rate))
+            if exposure is not None
+            else pd.Series(float(rate), index=dup.index)
+        )
+        for name, rate in channel_rates.items()
+    }
     ops_logs: list[pd.DataFrame] = []
-    for name, rate in channel_rates.items():
-        if exposure is not None:
-            rates = exposure.per_record_rates(dup, float(rate))
-        else:
-            rates = pd.Series(float(rate), index=dup.index)
-        dup, ops = resolved[name].apply(dup, rng, rates)
+    for name in channel_rates:
+        dup, ops = resolved[name].apply(dup, rng, rate_vectors[name])
         ops_logs.append(ops)
 
     corpus = pd.concat([base.iloc[np.flatnonzero(keep)], dup], ignore_index=True)
@@ -135,9 +154,7 @@ def generate_corpus(
     corpus = corpus.iloc[perm].reset_index(drop=True)
     corpus = corpus.astype({c: "string" for c in corpus.columns})
 
-    ops_log = (
-        pd.concat(ops_logs, ignore_index=True).astype("string") if ops_logs else ops_frame([])
-    )
+    ops_log = pd.concat(ops_logs, ignore_index=True).astype("string") if ops_logs else ops_frame([])
     return corpus, ops_log
 
 
@@ -175,7 +192,10 @@ def household_confusables(
     spawns one confusable with probability ``rate``. Kinds: 'sibling' (different
     given_name, birth field shifted ±1..10 years), 'jr_sr' (same given_name,
     complementary Jr/Sr suffix, birth shifted 20..35 years the right way), and
-    'twin' (different given_name, identical birth field). Confusables copy every
+    'twin' (different given_name, identical birth field). A drawn sibling whose
+    birth field is missing or unshiftable (unparseable dob, non-digit
+    birth_year) is logged as kind='twin' — the honest label for what was
+    actually synthesized. Confusables copy every
     other field verbatim, get ``record_id = f'{base_record_id}#hh1'`` and a FRESH
     ``entity_id`` equal to that record_id — never the base entity. The ops-style
     log (channel='household') records a '__kind__' row plus one row per field
@@ -189,7 +209,9 @@ def household_confusables(
     addr_field = "street_address" if "street_address" in df.columns else "street"
     kinds = ["sibling", "twin"] + (["jr_sr"] if "name_suffix" in df.columns else [])
     kind_p = [0.5, 0.25, 0.25] if len(kinds) == 3 else [2 / 3, 1 / 3]
-    birth_field = "dob" if "dob" in df.columns else ("birth_year" if "birth_year" in df.columns else None)
+    birth_field = (
+        "dob" if "dob" in df.columns else ("birth_year" if "birth_year" in df.columns else None)
+    )
 
     pool = (
         sorted({str(v) for v in df["given_name"].dropna() if str(v) != ""})
@@ -197,21 +219,13 @@ def household_confusables(
         else []
     )
 
-    def value(pos: int, fld: str) -> str | None:
-        if fld not in df.columns:
-            return None
-        v = df[fld].iloc[pos]
-        if pd.isna(v) or v == "":
-            return None
-        return str(v)
-
     selected = np.flatnonzero(rng.random(len(df)) < np.clip(float(rate), 0.0, 1.0))
     rows: list[pd.Series] = []
     ops: list[tuple] = []
     for pos in selected:
         pos = int(pos)
-        given, family = value(pos, "given_name"), value(pos, "family_name")
-        if given is None or family is None or value(pos, addr_field) is None:
+        given, family = get_cell(df, pos, "given_name"), get_cell(df, pos, "family_name")
+        if given is None or family is None or get_cell(df, pos, addr_field) is None:
             continue
         kind = str(rng.choice(kinds, p=kind_p))
         new = df.iloc[pos].copy()
@@ -226,7 +240,7 @@ def household_confusables(
                 continue
             edits.append(("given_name", given, other))
             if kind == "sibling" and birth_field is not None:
-                b = value(pos, birth_field)
+                b = get_cell(df, pos, birth_field)
                 delta = int(rng.integers(1, 11)) * (-1 if rng.random() < 0.5 else 1)
                 if b is not None:
                     shifted = (
@@ -237,7 +251,7 @@ def household_confusables(
                     if shifted is not None and shifted != b:
                         edits.append((birth_field, b, shifted))
         else:  # jr_sr
-            cur_suffix = value(pos, "name_suffix")
+            cur_suffix = get_cell(df, pos, "name_suffix")
             if cur_suffix is not None and cur_suffix.upper().strip(".") == "JR":
                 new_suffix, direction = "sr", -1  # base is the junior; new is older
             elif cur_suffix is not None and cur_suffix.upper().strip(".") == "SR":
@@ -246,10 +260,10 @@ def household_confusables(
                 new_suffix = str(rng.choice(["jr", "sr"]))
                 direction = 1 if new_suffix == "jr" else -1
             cased = match_case(family, new_suffix)
-            if not _eq_na(df["name_suffix"].iloc[pos], cased):
+            if not cell_eq(df["name_suffix"].iloc[pos], cased):
                 edits.append(("name_suffix", df["name_suffix"].iloc[pos], cased))
             if birth_field is not None:
-                b = value(pos, birth_field)
+                b = get_cell(df, pos, birth_field)
                 delta = direction * int(rng.integers(20, 36))
                 if b is not None:
                     shifted = (
@@ -260,22 +274,22 @@ def household_confusables(
                     if shifted is not None and shifted != b:
                         edits.append((birth_field, b, shifted))
 
+        if kind == "sibling" and not any(f == birth_field for f, _, _ in edits):
+            # birth field missing/unshiftable: what was synthesized is structurally
+            # a twin (different given_name, identical birth), so label it honestly
+            kind = "twin"
         ops.append((rid, "household", "__kind__", pd.NA, kind))
         for fld, before, after in edits:
             new[fld] = after
             ops.append((rid, "household", fld, before, after))
         rows.append(new)
 
+    # one explicit schema for both branches: base columns plus entity_id (which the
+    # row path appends when the base frame lacks it)
+    cols = list(df.columns) + (["entity_id"] if "entity_id" not in df.columns else [])
     if rows:
-        hh = pd.DataFrame(rows).reset_index(drop=True)
+        hh = pd.DataFrame(rows).reset_index(drop=True)[cols]
     else:
-        hh = pd.DataFrame(columns=df.columns)
+        hh = pd.DataFrame(columns=cols)
     hh = hh.astype({c: "string" for c in hh.columns})
     return hh, ops_frame(ops)
-
-
-def _eq_na(a: object, b: object) -> bool:
-    a_na, b_na = bool(pd.isna(a)), bool(pd.isna(b))
-    if a_na or b_na:
-        return a_na and b_na
-    return a == b

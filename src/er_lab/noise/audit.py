@@ -13,15 +13,21 @@ Categories, in decision order per (pair, field):
 - ``identical``: verbatim-equal, or missing on both sides
 - ``missing_gain`` / ``missing_loss``: missing (NA or blank) on exactly one side
 - ``swap``: the value pair is exchanged with another name field of the same record
-- ``format_drift``: same alphanumeric skeleton — only punctuation/spacing/case differ
-- ``nickname``: given_name pair related by the nickname lexicon
+- ``format_drift``: same content in a different format — same alphanumeric
+  skeleton (only punctuation/spacing/case differ), same skeleton after
+  USPS-style abbreviation normalization ('MAIN STREET' ~ 'MAIN ST'), or both
+  sides parsing to the same calendar date ('1985-03-04' ~ '03/04/1985')
+- ``nickname``: given_name pair sharing a nickname-lexicon canonical class
+  (canonical<->variant or variant<->variant, e.g. bill<->will)
 - ``typo``: case-insensitive Levenshtein distance <= 2
 - ``wholesale``: everything else
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping, Sequence
+from datetime import datetime
 
 import jellyfish
 import numpy as np
@@ -45,6 +51,66 @@ SWAP_FIELDS = ("given_name", "middle_name", "family_name")
 _TYPO_MAX_EDITS = 2
 _Z95 = float(norm.ppf(0.975))  # Wilson 95%
 
+# ---------------------------------------------------------------------------
+# Audit-local domain tables — DELIBERATE literal copies, NOT imported from
+# er_lab.noise.channels. This module scores the generator (NSE-02), so it must
+# stay independent of the channel implementations even where the domain
+# knowledge (common US date formats, USPS street abbreviations) overlaps.
+# ---------------------------------------------------------------------------
+
+#: date formats recognized for date-equivalence format drift, tried in order.
+_DATE_FORMATS: tuple[str, ...] = ("%Y-%m-%d", "%m/%d/%Y", "%Y%m%d", "%m-%d-%Y", "%d %b %Y")
+
+# fmt: off
+_ABBREV_PAIRS: tuple[tuple[str, str], ...] = (  # USPS-style long <-> short
+    ("STREET", "ST"), ("AVENUE", "AVE"), ("ROAD", "RD"), ("DRIVE", "DR"),
+    ("LANE", "LN"), ("BOULEVARD", "BLVD"), ("COURT", "CT"), ("CIRCLE", "CIR"),
+    ("PLACE", "PL"), ("HIGHWAY", "HWY"), ("TRAIL", "TRL"), ("PARKWAY", "PKWY"),
+    ("NORTH", "N"), ("SOUTH", "S"), ("EAST", "E"), ("WEST", "W"),
+    ("APARTMENT", "APT"), ("SUITE", "STE"),
+)
+# fmt: on
+_ABBREV_TO_SHORT: dict[str, str] = {w: s for lng, s in _ABBREV_PAIRS for w in (lng, s)}
+
+
+def _parse_date(value: str) -> datetime | None:
+    for fmt in _DATE_FORMATS:
+        try:
+            return datetime.strptime(value, fmt)  # noqa: DTZ007 - dates, not instants
+        except ValueError:
+            continue
+    return None
+
+
+def _dates_equal(x: str, y: str) -> bool:
+    """True when both sides parse as calendar dates denoting the same day."""
+    dx = _parse_date(x.strip())
+    if dx is None:
+        return False
+    dy = _parse_date(y.strip())
+    return dy is not None and dx == dy
+
+
+def _abbrev_skeleton(value: str) -> str:
+    """Skeleton after normalizing USPS-style long/short words to the short form."""
+    words = [_ABBREV_TO_SHORT.get(w.upper(), w) for w in value.split()]
+    return re.sub(r"[\W_]+", "", " ".join(words).lower())
+
+
+def _nickname_classes(lexicon: Mapping[str, set[str]]) -> dict[str, frozenset[str]]:
+    """Canonical-class closure: lower-cased name -> ids of lexicon entries containing it.
+
+    Each lexicon entry's ``{canonical} | variants`` forms one class (keyed by its
+    canonical name); two given names are nickname-related when their class sets
+    intersect. This catches variant<->variant pairs (bill<->will, billy<->liam)
+    as well as canonical<->variant, in both directions.
+    """
+    classes: dict[str, set[str]] = {}
+    for canonical, variants in lexicon.items():
+        for name in {canonical, *variants}:
+            classes.setdefault(name, set()).add(canonical)
+    return {name: frozenset(ids) for name, ids in classes.items()}
+
 
 def _is_missing(s: pd.Series) -> np.ndarray:
     """NA or whitespace-only counts as missing (NC snapshots use '' for NULL)."""
@@ -64,7 +130,7 @@ def _skeleton(s: pd.Series) -> pd.Series:
 def _classify_field(
     field: str,
     sides: dict[str, tuple[pd.Series, pd.Series]],
-    lexicon: Mapping[str, set[str]] | None,
+    nick_classes: Mapping[str, frozenset[str]] | None,
     swap_fields: Sequence[str],
 ) -> np.ndarray:
     a, b = sides[field]
@@ -87,20 +153,27 @@ def _classify_field(
         cat[swap] = "swap"
         rest &= ~swap
 
-    drift = rest & _eq(_skeleton(a), _skeleton(b))
+    skel_eq = _eq(_skeleton(a), _skeleton(b))
+    raw_a, raw_b = a.tolist(), b.tolist()
+    drift = np.fromiter(
+        (
+            bool(r) and (s or _abbrev_skeleton(x) == _abbrev_skeleton(y) or _dates_equal(x, y))
+            for r, s, x, y in zip(rest, skel_eq, raw_a, raw_b)
+        ),
+        dtype=bool,
+        count=len(a),
+    )
     cat[drift] = "format_drift"
     rest &= ~drift
 
     lower_a = a.str.lower().tolist()
     lower_b = b.str.lower().tolist()
-    if field == "given_name" and lexicon is not None:
+    if field == "given_name" and nick_classes is not None:
+        empty: frozenset[str] = frozenset()
         nick = np.fromiter(
             (
                 bool(r)
-                and (
-                    y.strip() in lexicon.get(x.strip(), ())
-                    or x.strip() in lexicon.get(y.strip(), ())
-                )
+                and bool(nick_classes.get(x.strip(), empty) & nick_classes.get(y.strip(), empty))
                 for r, x, y in zip(rest, lower_a, lower_b)
             ),
             dtype=bool,
@@ -133,8 +206,10 @@ def classify_pair_diffs(
 
     ``aligned_df`` is ``er_lab.data.nc.align_pair`` output: a ``key`` column
     plus ``<field>_a``/``<field>_b`` for every field. ``lexicon`` maps
-    lower-cased canonical given names to sets of lower-cased variants; without
-    it the nickname category never fires. Swap detection compares each name
+    lower-cased canonical given names to sets of lower-cased variants; two
+    names count as nickname-related when they share a lexicon entry's class
+    (``{canonical} | variants``, see ``_nickname_classes``). Without a lexicon
+    the nickname category never fires. Swap detection compares each name
     field against the other ``swap_fields`` whose columns are present.
 
     Row order is part of the contract: one block per field in ``fields``
@@ -155,10 +230,15 @@ def classify_pair_diffs(
         elif f in fields:
             raise KeyError(f"aligned frame lacks columns {f}_a/{f}_b for field {f!r}")
 
+    nick_classes = _nickname_classes(lexicon) if lexicon is not None else None
     keys = aligned_df[key].astype("string").tolist()
     blocks = [
         pd.DataFrame(
-            {"key": keys, "field": f, "category": _classify_field(f, sides, lexicon, swap_fields)}
+            {
+                "key": keys,
+                "field": f,
+                "category": _classify_field(f, sides, nick_classes, swap_fields),
+            }
         )
         for f in fields
     ]

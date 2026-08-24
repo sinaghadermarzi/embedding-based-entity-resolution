@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 import pytest
 
+from er_lab.noise.exposure import ExposureModel
 from er_lab.noise.generate import generate_corpus, household_confusables
 
 
 def make_base(n: int = 300) -> pd.DataFrame:
+    # compact fixture data
+    # fmt: off
     given = ["WILLIAM", "ROBERT", "ELIZABETH", "MARGARET", "JAMES", "KATHERINE", "MICHAEL", "PATRICIA"]
     fam = ["SMITH", "GARCIA LOPEZ", "JOHNSON", "MCDONALD", "OBRIEN", "LEE", "MARTINEZ", "BROWN"]
+    # fmt: on
     rows = {
         "record_id": [f"r{i:05d}" for i in range(n)],
         "entity_id": [pd.NA] * n,
@@ -73,9 +79,7 @@ def test_entity_id_preserved_when_present():
 
 def test_zipf_cluster_shape():
     base = make_base(2000)
-    corpus, ops = generate_corpus(
-        base, channel_rates={}, dup_params={"a": 2.5, "max": 20}, seed=5
-    )
+    corpus, ops = generate_corpus(base, channel_rates={}, dup_params={"a": 2.5, "max": 20}, seed=5)
     assert len(ops) == 0
     sizes = corpus.groupby("entity_id").size()
     assert len(sizes) == 2000  # every base entity present (keep_original_rate=1.0)
@@ -147,6 +151,29 @@ def test_exposure_model_drives_rates():
             assert rid not in mutated
 
 
+def test_exposure_rates_computed_from_pristine_dup_frame():
+    """Exposure is generative: a dup whose race cell was dropped by an earlier
+    channel must still get the exposure-multiplied rate for later channels."""
+    base = make_base(1500)
+    base["race"] = pd.Series(["B"] * len(base), dtype="string")
+    exposure = ExposureModel.from_table(pd.DataFrame({"race": ["B"], "multiplier": [8.0]}))
+    _corpus, ops = generate_corpus(
+        base,
+        channel_rates={"field_dropout": 0.9, "typo": 0.1},
+        exposure=exposure,
+        seed=23,
+    )
+    dropped = set(
+        ops.loc[(ops["channel"] == "field_dropout") & (ops["field"] == "race"), "record_id"]
+    )
+    assert len(dropped) > 100  # race-dropped dups form a real subpopulation
+    typo_rids = set(ops.loc[ops["channel"] == "typo", "record_id"])
+    nominal = min(0.1 * 8.0, 1.0)  # multiplied typo rate, regardless of the dropout
+    observed = len(dropped & typo_rids) / len(dropped)
+    tol = 4 * math.sqrt(nominal * (1 - nominal) / len(dropped)) + 0.02  # + no-op slack
+    assert abs(observed - nominal) < tol, (observed, nominal, tol)
+
+
 def test_unknown_channel_raises():
     with pytest.raises(KeyError):
         generate_corpus(make_base(10), channel_rates={"nope": 0.1}, seed=1)
@@ -215,6 +242,40 @@ def test_household_ops_match_field_changes():
                 assert logged[(rid, col)] == (before, after) or (
                     eq(logged[(rid, col)][0], before) and eq(logged[(rid, col)][1], after)
                 )
+
+
+def test_household_schema_identical_between_empty_and_populated():
+    base = make_base(40).drop(columns=["entity_id"])
+    populated, _ = household_confusables(base, rate=1.0, seed=1)
+    empty, _ = household_confusables(base, rate=0.0, seed=1)
+    assert len(populated) > 0 and len(empty) == 0
+    assert "entity_id" in populated.columns
+    assert list(empty.columns) == list(populated.columns)
+    assert (empty.dtypes == populated.dtypes).all()
+
+
+def test_household_unshiftable_sibling_logged_as_twin():
+    """A drawn sibling whose dob cannot be shifted is structurally a twin and
+    must be labeled as one in the __kind__ ops row."""
+    base = make_base(80)
+    base["dob"] = pd.Series(["UNKNOWN"] * len(base), dtype="string")
+    hh, ops = household_confusables(base, rate=1.0, seed=5)
+    kinds = {
+        str(r.record_id): str(r.after)
+        for r in ops.itertuples(index=False)
+        if str(r.field) == "__kind__"
+    }
+    assert len(hh) > 0
+    assert "twin" in kinds.values()
+    assert "sibling" not in kinds.values()  # every drawn sibling was relabeled
+    # relabeled twins really are twins: identical birth field, different given name
+    base_rows = {str(r): base.iloc[i] for i, r in enumerate(base["record_id"])}
+    for i in range(len(hh)):
+        rid = str(hh["record_id"].iloc[i])
+        if kinds[rid] == "twin":
+            b = base_rows[rid.split("#hh")[0]]
+            assert hh["dob"].iloc[i] == b["dob"] == "UNKNOWN"
+            assert hh["given_name"].iloc[i] != b["given_name"]
 
 
 def test_household_determinism():

@@ -27,13 +27,18 @@ EXPECTED_CHANNELS = {
 
 
 def make_frame(n: int = 60) -> pd.DataFrame:
+    # compact fixture data
+    # fmt: off
     given = ["WILLIAM", "Robert", "ELIZABETH", "MARGARET", "JAMES", "Katherine", "MICHAEL", "PATRICIA"]
     fam = ["SMITH", "GARCIA LOPEZ", "JOHNSON", "MCDONALD", "OBRIEN", "LEE", "MARTINEZ", "BROWN"]
+    # fmt: on
     rows = {
         "record_id": [f"r{i:05d}" for i in range(n)],
         "entity_id": [pd.NA] * n,
         "given_name": [given[i % 8] for i in range(n)],
-        "middle_name": [("JOSEFA" if i % 3 == 0 else ("ANN" if i % 3 == 1 else pd.NA)) for i in range(n)],
+        "middle_name": [
+            ("JOSEFA" if i % 3 == 0 else ("ANN" if i % 3 == 1 else pd.NA)) for i in range(n)
+        ],
         "family_name": [fam[i % 8] for i in range(n)],
         "name_suffix": [("JR" if i % 5 == 0 else pd.NA) for i in range(n)],
         "dob": [f"19{60 + i % 40:02d}-{1 + i % 12:02d}-{1 + i % 28:02d}" for i in range(n)],
@@ -160,7 +165,9 @@ def test_ocr_hits_digit_fields():
 
 def test_phonetic_spelling_changes_values():
     df = make_frame(200)
-    _, ops = C.phonetic_spelling().apply(df, np.random.default_rng(8), pd.Series(0.9, index=df.index))
+    _, ops = C.phonetic_spelling().apply(
+        df, np.random.default_rng(8), pd.Series(0.9, index=df.index)
+    )
     assert len(ops) > 10
     assert (ops["before"] != ops["after"]).all()
 
@@ -194,7 +201,9 @@ def test_nickname_reverse_direction():
 
 def test_name_order_swap_logs_both_cells():
     df = make_frame(20)
-    out, ops = C.name_order_swap().apply(df, np.random.default_rng(2), pd.Series(1.0, index=df.index))
+    out, ops = C.name_order_swap().apply(
+        df, np.random.default_rng(2), pd.Series(1.0, index=df.index)
+    )
     assert len(ops) == 40  # two rows per record
     for i in range(len(df)):
         assert out["given_name"].iloc[i] == df["family_name"].iloc[i]
@@ -222,7 +231,9 @@ def test_format_drift_dob_preserves_date():
         },
         dtype="string",
     )
-    _out, ops = C.field_format_drift().apply(df, np.random.default_rng(1), pd.Series(1.0, index=df.index))
+    _out, ops = C.field_format_drift().apply(
+        df, np.random.default_rng(1), pd.Series(1.0, index=df.index)
+    )
     assert len(ops) == n
     assert (ops["field"] == "dob").all()
     for r in ops.itertuples(index=False):
@@ -242,7 +253,9 @@ def test_format_drift_phone_preserves_digits():
         },
         dtype="string",
     )
-    _, ops = C.field_format_drift().apply(df, np.random.default_rng(1), pd.Series(1.0, index=df.index))
+    _, ops = C.field_format_drift().apply(
+        df, np.random.default_rng(1), pd.Series(1.0, index=df.index)
+    )
     assert len(ops) == n
     for r in ops.itertuples(index=False):
         assert "".join(c for c in str(r.after) if c.isdigit()) == "9195551234"
@@ -260,14 +273,18 @@ def test_format_drift_address_abbreviation():
         },
         dtype="string",
     )
-    _out, ops = C.field_format_drift().apply(df, np.random.default_rng(1), pd.Series(1.0, index=df.index))
+    _out, ops = C.field_format_drift().apply(
+        df, np.random.default_rng(1), pd.Series(1.0, index=df.index)
+    )
     assert len(ops) == n
     assert set(ops["after"]) == {"MAIN ST"}
 
 
 def test_suffix_confusion_add_drop_swap():
     df = make_frame(50)
-    _out, ops = C.suffix_confusion().apply(df, np.random.default_rng(10), pd.Series(1.0, index=df.index))
+    _out, ops = C.suffix_confusion().apply(
+        df, np.random.default_rng(10), pd.Series(1.0, index=df.index)
+    )
     assert len(ops) == 50
     assert (ops["field"] == "name_suffix").all()
     had = {str(r): v for r, v in zip(df["record_id"], df["name_suffix"])}

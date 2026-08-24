@@ -358,6 +358,7 @@ _OCR_PAIRS: tuple[tuple[str, str], ...] = (
 # --- embedded phonetic rules (GeCO-lineage; flags: ^ start, $ end, _ middle,
 #     "" = anywhere). Case variants generated below. --------------------------
 
+# fmt: off
 _PHONETIC_RULES: tuple[tuple[str, str, str], ...] = (
     ("ph", "f", ""), ("f", "ph", "$"), ("gh", "f", "$"),
     ("ck", "k", ""), ("k", "ck", "$"), ("c", "k", "^"), ("k", "c", "^"),
@@ -370,6 +371,7 @@ _PHONETIC_RULES: tuple[tuple[str, str, str], ...] = (
     ("kn", "n", "^"), ("wr", "r", "^"),
     ("mb", "m", "$"), ("dt", "t", "$"),
 )
+# fmt: on
 
 
 def _phonetic_table() -> pd.DataFrame:
@@ -381,6 +383,7 @@ def _phonetic_table() -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["pattern", "replacement", "flags"])
 
 
+# fmt: off
 _TYPO_FIELDS = ("given_name", "middle_name", "family_name", "street", "city")
 _OCR_FIELDS = (
     "given_name", "middle_name", "family_name", "street", "city",
@@ -391,6 +394,7 @@ _DROPOUT_FIELDS = (
     "middle_name", "name_suffix", "dob", "birth_year", "phone", "email",
     "unit", "race", "ethnicity", "sex",
 )
+# fmt: on
 
 
 def typo(fields: Sequence[str] = _TYPO_FIELDS) -> Channel:
@@ -588,6 +592,7 @@ def field_dropout(fields: Sequence[str] = _DROPOUT_FIELDS) -> Channel:
     return PerRecordChannel(name="field_dropout", edit_fn=edit)
 
 
+# fmt: off
 _ADDR_ABBREV: tuple[tuple[str, str], ...] = (
     ("STREET", "ST"), ("AVENUE", "AVE"), ("ROAD", "RD"), ("DRIVE", "DR"),
     ("LANE", "LN"), ("BOULEVARD", "BLVD"), ("COURT", "CT"), ("CIRCLE", "CIR"),
@@ -595,6 +600,7 @@ _ADDR_ABBREV: tuple[tuple[str, str], ...] = (
     ("NORTH", "N"), ("SOUTH", "S"), ("EAST", "E"), ("WEST", "W"),
     ("APARTMENT", "APT"), ("SUITE", "STE"),
 )
+# fmt: on
 _ADDR_WORDMAP: dict[str, str] = {}
 for _long, _short in _ADDR_ABBREV:
     _ADDR_WORDMAP[_long] = _short
