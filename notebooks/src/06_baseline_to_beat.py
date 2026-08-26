@@ -204,11 +204,33 @@ _ = conjecture_card(
 # an AND-rule over the two strongest keys, u by seeded random sampling, and two
 # complementary EM sessions (block on dob to train the name m's, block on names to train the
 # rest — EM cannot estimate a comparison that sits in its own blocking rule). Splink's
-# per-iteration log lines are silenced; convergence is *asserted on the recorded facts* in
-# `linker._er_lab_training`, displayed below — the fs-adapter's own honesty rail.
+# per-iteration INFO stream is silenced below — the level must be pinned on the
+# `splink.internals` child logger, because every `Linker` construction resets the parent
+# `splink` logger back to INFO — and its default-`max_pairs` warning is filtered as
+# misleading here: Splink emits it whenever `max_pairs == 1e6` whether or not the caller
+# passed it, and `MAX_PAIRS_U = 1e6` IS passed explicitly (the smoke-tier budget above).
+# Convergence is *asserted on the recorded facts* in `linker._er_lab_training`, displayed
+# below — the fs-adapter's own honesty rail.
 
 # %%
-logging.getLogger("splink").setLevel(logging.WARNING)  # convergence facts, not log lines
+# Convergence facts, not log lines. All of Splink 4's emitting loggers live under
+# splink.internals.*; Linker.__init__ resets logging.getLogger("splink") to INFO on every
+# construction but never touches this child, so the pin holds for the whole notebook.
+logging.getLogger("splink.internals").setLevel(logging.WARNING)
+
+
+class _MaxPairsDefaultFilter(logging.Filter):
+    """Drop Splink's 'default value for max_pairs' warning: it fires on the VALUE
+    (max_pairs == 1e6), not on whether the caller passed it — and MAX_PAIRS_U is
+    passed explicitly here, so the warning would misreport this notebook's config."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "default value for `max_pairs`" not in record.getMessage()
+
+
+logging.getLogger("splink.internals.linker_components.training").addFilter(
+    _MaxPairsDefaultFilter()
+)
 
 t0 = time.time()
 linker = fit_fs(train, schema=schema, max_pairs=MAX_PAIRS_U)

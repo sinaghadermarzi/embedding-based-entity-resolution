@@ -63,10 +63,10 @@ NOTEBOOK_DAG: dict[str, dict[str, list[str]]] = {
     },
     "06_baseline_to_beat.ipynb": {
         "requires": ["calibrated_corpus", "met07_splits"],
-        "produces": ["bas01_fs_baseline"],
+        "produces": ["bas01_fs_baseline", "bas01_scored_pairs"],
     },
     "07_chain_merge_catastrophe.ipynb": {
-        "requires": ["calibrated_corpus", "bas01_fs_baseline"],
+        "requires": ["calibrated_corpus", "bas01_fs_baseline", "bas01_scored_pairs"],
         "produces": ["chain_merge_demo"],
     },
     "08_person_as_a_vector.ipynb": {

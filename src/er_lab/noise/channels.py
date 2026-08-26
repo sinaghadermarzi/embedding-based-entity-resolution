@@ -514,18 +514,53 @@ def fetch_lexicon(data_root: str | Path, url: str = NICKNAMES_URL, timeout: floa
 def load_lexicon(data_root: str | Path) -> dict[str, set[str]]:
     """Load the fetched lexicon: dict[canonical_lower, set of variants_lower].
 
-    File format (carltonnorthern names.csv): one canonical name per line followed
-    by its comma-separated nicknames, no header.
+    Auto-detects both carltonnorthern names.csv formats:
+
+    - legacy: one canonical name per line followed by its comma-separated
+      nicknames, no header (``william,bill,will``);
+    - current: one ``name1,<relationship>,name2`` triple per line under a header
+      row (``name1,relationship,name2``; the relationship value is
+      ``has_nickname``), each data row linking ``name2`` as a variant of
+      ``name1``. The header row is skipped and the relationship column is
+      dropped — it never becomes a variant.
     """
     path = Path(data_root) / "lexicons" / "names.csv"
     if not path.exists():
         raise FileNotFoundError(f"{path} not found; run fetch_lexicon(data_root) first")
-    lexicon: dict[str, set[str]] = {}
+    rows = []
     for line in path.read_text(encoding="utf-8").splitlines():
         parts = [p.strip().lower() for p in line.split(",") if p.strip()]
+        if parts:
+            rows.append(parts)
+    lexicon: dict[str, set[str]] = {}
+    for parts in _lexicon_variant_rows(rows):
         if len(parts) >= 2:
-            lexicon.setdefault(parts[0], set()).update(parts[1:])
-    return lexicon
+            lexicon.setdefault(parts[0], set()).update(v for v in parts[1:] if v != parts[0])
+    return {canon: variants for canon, variants in lexicon.items() if variants}
+
+
+def _lexicon_variant_rows(rows: list[list[str]]) -> list[list[str]]:
+    """Normalize parsed names.csv rows to legacy-shaped ``[canonical, variant, ...]`` rows.
+
+    Triple-format detection (see :func:`load_lexicon`): a ``name1,...,name2``
+    header row, or — for a headerless triple file — every row carrying exactly
+    three fields that share one identical middle token containing an underscore
+    (a relationship tag such as ``has_nickname``, never a name). Anything else
+    is the legacy format and passes through unchanged.
+    """
+    if not rows:
+        return []
+    has_header = rows[0][0] == "name1" and rows[0][-1] == "name2"
+    body = rows[1:] if has_header else rows
+    is_triple = has_header or (
+        bool(body)
+        and all(len(r) == 3 for r in body)
+        and len({r[1] for r in body}) == 1
+        and "_" in body[0][1]
+    )
+    if not is_triple:
+        return body
+    return [[r[0], r[2]] for r in body if len(r) == 3]
 
 
 def _nickname_candidates(lexicon: Mapping[str, set[str]]) -> dict[str, tuple[str, ...]]:

@@ -346,12 +346,50 @@ def test_scalar_rate_accepted():
     assert len(ops) == 20
 
 
-def test_load_lexicon_from_fixture(tmp_path):
+def _write_lexicon(tmp_path, text: str) -> None:
     lex_dir = tmp_path / "lexicons"
     lex_dir.mkdir()
-    (lex_dir / "names.csv").write_text("william,bill,will\nrobert,bob\nsolo\n")
+    (lex_dir / "names.csv").write_text(text)
+
+
+def test_load_lexicon_legacy_format(tmp_path):
+    _write_lexicon(tmp_path, "william,bill,will\nrobert,bob\nsolo\n")
     lex = C.load_lexicon(tmp_path)
     assert lex == {"william": {"bill", "will"}, "robert": {"bob"}}
+
+
+def test_load_lexicon_legacy_single_row_not_misdetected_as_triple(tmp_path):
+    # one legacy row with exactly two nicknames must NOT be read as a triple
+    _write_lexicon(tmp_path, "william,bill,will\n")
+    assert C.load_lexicon(tmp_path) == {"william": {"bill", "will"}}
+
+
+@pytest.mark.parametrize("header", ["name1,relationship,name2", "name1,has_nickname,name2"])
+def test_load_lexicon_triple_format_with_header(tmp_path, header):
+    _write_lexicon(
+        tmp_path,
+        f"{header}\n"
+        "william,has_nickname,bill\n"
+        "william,has_nickname,will\n"
+        "robert,has_nickname,bob\n",
+    )
+    lex = C.load_lexicon(tmp_path)
+    assert lex == {"william": {"bill", "will"}, "robert": {"bob"}}
+    assert "name1" not in lex  # header row skipped
+    assert all("has_nickname" not in v for v in lex.values())  # no spurious variants
+
+
+def test_load_lexicon_triple_format_headerless(tmp_path):
+    _write_lexicon(tmp_path, "william,has_nickname,bill\nrobert,has_nickname,bob\n")
+    assert C.load_lexicon(tmp_path) == {"william": {"bill"}, "robert": {"bob"}}
+
+
+def test_load_lexicon_triple_format_drops_self_links(tmp_path):
+    _write_lexicon(
+        tmp_path,
+        "name1,relationship,name2\nwilliam,has_nickname,william\nrobert,has_nickname,bob\n",
+    )
+    assert C.load_lexicon(tmp_path) == {"robert": {"bob"}}
 
 
 def test_load_lexicon_missing_raises(tmp_path):

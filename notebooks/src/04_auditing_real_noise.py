@@ -226,11 +226,12 @@ _ = conjecture_card(
 lexicon_csv = fetch_lexicon(data_root=str(DATA_ROOT / "data"))
 lexicon_raw = load_lexicon(str(DATA_ROOT / "data"))
 
-# WORKAROUND (package bug, reported in-notebook rather than patching src/): the upstream
-# names.csv changed format from "canonical,nick1,nick2,..." to one "name1,has_nickname,name2"
-# triple per line with a header row. load_lexicon parses the old format, so every entry gains a
-# spurious 'has_nickname' variant and the header row becomes a bogus 'name1' entry. Harmless for
-# classification (no real given name is 'has_nickname'), but the counts would lie — so sanitize.
+# GUARD (drift rail, expected to no-op): this notebook's first build caught the upstream
+# names.csv drifting to a "name1,has_nickname,name2" triple format that the then-current
+# load_lexicon mis-parsed (spurious 'has_nickname' variants + a bogus 'name1' header entry);
+# load_lexicon now auto-detects both formats, so the mis-parse markers below should be absent
+# and this sanitizer should change nothing. It stays as a rail against the NEXT upstream format
+# drift — its finding (True only if the loader mis-parsed again) is recorded in the meta.
 drifted = "name1" in lexicon_raw or any("has_nickname" in v for v in lexicon_raw.values())
 lexicon = {
     canon: {v for v in variants if v not in ("has_nickname", "relationship")}
@@ -239,9 +240,10 @@ lexicon = {
 }
 lexicon = {c: v for c, v in lexicon.items() if v}
 print(f"lexicon file: {lexicon_csv}")
-print(f"upstream format drift detected: {drifted} "
-      f"(raw entries {len(lexicon_raw)} -> sanitized {len(lexicon)})")
-print(f"sanitized lexicon: {len(lexicon)} canonical names, "
+print(f"loader mis-parse detected: {drifted} — sanitizer "
+      f"{'FIRED' if drifted else 'no-op'} (raw entries {len(lexicon_raw)} -> "
+      f"kept {len(lexicon)})")
+print(f"lexicon: {len(lexicon)} canonical names, "
       f"{sum(len(v) for v in lexicon.values())} variant links "
       "(English-centric; provenance bias carried on every nickname claim)")
 
@@ -396,7 +398,7 @@ registry.register(
             "source": "carltonnorthern nicknames (fetched)",
             "canonical": len(lexicon),
             "variant_links": int(sum(len(v) for v in lexicon.values())),
-            "upstream_format_drift_workaround": bool(drifted),
+            "upstream_format_drift_sanitizer_fired": bool(drifted),
             "limitation": "English-centric, documented provenance bias (PLAN §4)",
         },
     },
@@ -825,9 +827,11 @@ _ = verdict_box(
 #   has a substrate in which disparate error exposure exists *by measurement*, not by assumption.
 # - **What this audit cannot calibrate, said out loud:** entry-error channels (typo, OCR,
 #   phonetic misspelling) are bounded only from below here — the two-snapshot diff cannot see a
-#   stable typo. Their base rates in notebook 05 come from generic literature defaults and are
-#   *labeled* generic-not-measured; NSE-03 then tests whether system rankings even care about
-#   that distinction.
+#   stable typo. Notebook 05 carries the typo channels at exactly these **measured floors**
+#   (labeled lower bounds in `calibrated_corpus` meta) and excludes OCR/phonetic entirely (no
+#   audit bin exists for them); the generic entry-error dose is deferred to TRN-03's
+#   augmentation dial and NSE-03's ranking-invariance test, where it is the experimental
+#   variable rather than a buried constant.
 #
 # ## What we now know
 #
@@ -848,10 +852,11 @@ _ = verdict_box(
 #   multipliers by race and sex for both name-change channels; the sex effect on family-name
 #   change is the headline (scored in the verdict), while small-group race multipliers are
 #   explicitly preliminary until the statewide `[RUN-IN-TARGET node]` rerun.
-# - **One package bug found and worked around in-notebook**: the upstream carltonnorthern
+# - **One package bug found here, since fixed at the source**: the upstream carltonnorthern
 #   `names.csv` changed to a `name1,has_nickname,name2` triple format that
-#   `noise.channels.load_lexicon` mis-parses (spurious `has_nickname` variants + a header
-#   entry); the sanitized lexicon is used everywhere and the workaround is recorded in the
+#   `noise.channels.load_lexicon` originally mis-parsed (spurious `has_nickname` variants + a
+#   header entry). The loader now auto-detects both formats; the in-notebook sanitizer remains
+#   as a no-op guard against the next upstream drift, and whether it fired is recorded in the
 #   artifact meta.
 #
 # ## What this changes downstream
