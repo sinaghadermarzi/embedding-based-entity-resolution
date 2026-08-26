@@ -992,15 +992,25 @@ fig = figures.plot_artifact(
 
 # %% [markdown]
 # Read the card the way the conjecture said to. The untrained twin's bars sit high
-# *everywhere* — should-hold and must-not-hold alike: a randomly-initialized smooth encoder
-# scores near-identical strings as near-identical vectors, whoever they denote, so its
-# "invariance" is vacuous and its confusable separation (the AUC annotations, trained bars)
-# has nothing to work with. Training moves the two families apart: same-person variants stay
-# close while the red band drops — similarity has been *reorganized* from string overlap
-# toward person identity. The `suffix_jr_sr` slice is the honest blemish to watch: the
-# training corpus carries no suffixes, so nothing ever pushed Jr away from Sr — the battery
-# can ask questions the training distribution never posed, and TRN-06 (notebook 11) exists
-# for exactly that family of gaps.
+# *everywhere* — should-hold and must-not-hold alike (every slice above 0.99 in the table):
+# a randomly-initialized smooth encoder scores near-identical strings as near-identical
+# vectors, whoever they denote, so its "invariance" is vacuous — and its confusable AUCs
+# sit *below* 0.5, because genuinely varying same-person records score LOWER than
+# one-field-off impostors. That inversion is notebook 00's "hardest easy problem" restated
+# in embedding space: string similarity is not person similarity.
+#
+# Training reorganizes the space — but *selectively*, and the red band names the
+# selectivity. `twin_household` (different given name, same family/place/DOB — the trap
+# notebook 05 planted) drops well below the typo slices and its AUC climbs far above the
+# twin's: the training pairs relentlessly contrast given names within and across entities,
+# so that axis got carved. `different_birth_year` barely moves — only the dob digits
+# differ, and a few hundred steps of name-dominated positives taught the encoder to read a
+# small dob edit like a typo rather than an identity change, so the one-birth-year-off
+# doppelgänger still outscores genuine variants. And `suffix_jr_sr` does not move at all:
+# the corpus carries no suffixes, so nothing ever pushed Jr away from Sr. The battery can
+# ask questions the training distribution never posed — and its per-slice verdicts point at
+# the pressures to come: augmentation/tokenization for field-level edits (notebook 10),
+# nickname and suffix supervision (notebook 11).
 
 # %% [markdown]
 # ## 7. The geometry panel: four numbers for a space
@@ -1159,7 +1169,9 @@ _ = verdict_box(
 # `reporting.figures.three_panel_pressure` from three registered panel frames. Read it left
 # to right as the lab's causal grammar: **left** — the pressure dial on x (here: the typo
 # dial), and on y how much training moved the property under pressure (the margin between
-# same-person typo variants and the twin-household confusable, trained minus untrained);
+# same-person typo variants and the twin-household confusable, trained minus untrained — a
+# margin that shrinks and finally inverts as the dial rises: invariance is a budgeted
+# quantity, not a switch);
 # **middle** — where each encoder lives on the alignment–uniformity plane (Wang–Isola's
 # map: bottom-left = aligned *and* spread, the contrastive sweet spot; the untrained twin
 # sits apart, aligned-by-collapse); **right** — the system metric over the same pressure
@@ -1247,14 +1259,18 @@ fig = figures.three_panel_pressure(
 #
 # - **Serialization is a real dial at matched budget** — the matrix separates arms trained
 #   identically in every other respect, and the paired-delta verdict above says exactly how
-#   far one smoke seed lets us trust the ordering (and where the loud fallback rail fired).
-#   The context-budget census turned a would-be silent confound into a measured, pre-flagged
-#   limitation of the smoke tier.
-# - **Training is what turns string geometry into person geometry.** The untrained twin —
-#   same architecture, same initialization, same inputs — scores confusables as high as
-#   variants; a few hundred optimizer steps reorganize the space (battery report card,
-#   uniformity shift) and the system metric follows. "A person as a vector" is earned, not
-#   free.
+#   far one smoke seed lets us trust the ordering (with the fixed-precision fallback rail's
+#   status recorded arm by arm either way). The context-budget census turned a would-be
+#   silent confound into a measured, pre-flagged limitation of the smoke tier.
+# - **Training is what turns string geometry into person geometry — and the battery shows
+#   exactly how far.** The untrained twin — same architecture, same initialization, same
+#   inputs — scores confusables as high as variants (separation AUCs below chance); a few
+#   hundred optimizer steps spread the space (the uniformity shift), separate the household
+#   trap, and move the system metric. But the report card also names what this one tiny
+#   contrastive run did NOT buy — dob-only doppelgängers and never-seen suffixes stay
+#   unseparated — which is precisely why the NB08-BATTERY verdict lands where it lands, and
+#   precisely the unfinished business notebooks 10 and 11 take up. "A person as a vector"
+#   is earned per-property, not granted wholesale.
 # - **The property battery, not any single number, is the lab's working answer to "what is
 #   a good person-embedding"** — invariances that hold, separations that don't collapse,
 #   geometry that supports retrieval, all measured on entity-disjoint eval data. The
