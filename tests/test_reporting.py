@@ -302,3 +302,36 @@ def test_verdict_box_validates_vocabulary_and_card_existence(registry):
     assert "UNEXPLAINED" in md and CARD["conjecture"] in md
     with pytest.raises(ValueError, match="evidence"):
         verdict_box("TRN03_aug", "CONFIRMED", "", registry)
+
+
+def test_plot_artifact_rails(tmp_path):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import pandas as pd
+    import pytest
+
+    from er_lab.config import load_config
+    from er_lab.infra.artifacts import ArtifactMissing, ArtifactRegistry
+    from er_lab.reporting.figures import CAPTION_GID, WATERMARK_GID, plot_artifact
+
+    reg = ArtifactRegistry(tmp_path)
+    cfg = load_config()
+
+    def draw(ax, df, meta):
+        ax.bar(df["k"], df["v"])
+
+    with pytest.raises(ArtifactMissing):
+        plot_artifact(reg, tier="smoke", artifact="nope", draw=draw)
+
+    reg.register(
+        "generic_demo",
+        pd.DataFrame({"k": ["a", "b"], "v": [1.0, 2.0], "basis": ["MEASURED", "EXTRAPOLATED"]}),
+        cfg=cfg,
+        tier="smoke",
+    )
+    fig = plot_artifact(reg, tier="smoke", artifact="generic_demo", draw=draw)
+    gids = {t.get_gid() for t in fig.texts}
+    caption = next(t for t in fig.texts if t.get_gid() == CAPTION_GID).get_text()
+    assert "generic_demo" in caption and "EXTRAPOLATED" in caption
+    assert WATERMARK_GID in gids

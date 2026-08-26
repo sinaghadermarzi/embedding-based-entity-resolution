@@ -42,6 +42,7 @@ from er_lab.infra.artifacts import ArtifactRegistry
 
 __all__ = [
     "line_with_ci",
+    "plot_artifact",
     "regime_heatmap",
     "scaling_curve",
     "setup_style",
@@ -440,6 +441,38 @@ def scaling_curve(
     if hue is not None:
         ax.legend(title=hue)
     extrapolated = any_extrap or meta_ex
+    if extrapolated:
+        _watermark(fig)
+    _stamp(fig, [artifact], [meta], tier, extrapolated)
+    return fig
+
+
+def plot_artifact(
+    registry: ArtifactRegistry,
+    *,
+    tier: str,
+    artifact: str,
+    draw,
+    basis: str = "basis",
+    title: str | None = None,
+    figsize: tuple[float, float] = (6.0, 4.0),
+) -> plt.Figure:
+    """Generic artifact-fed figure: any shape, same honesty rails.
+
+    Loads *artifact* through the registry (ArtifactMissing / TierMixingError
+    propagate — never render without provenance), then calls
+    ``draw(ax, df, meta)`` to put arbitrary marks on the axes. The caption
+    stamp and the EXTRAPOLATED watermark are applied here, from the artifact's
+    meta and its *basis* column — the caller cannot opt out of either. Use the
+    specialized functions when they fit; this exists so a one-off figure shape
+    never becomes a reason to bypass the registry.
+    """
+    df, meta = _load_frame(registry, artifact, tier=tier)
+    fig, ax = plt.subplots(figsize=figsize)
+    draw(ax, df, meta)
+    if title:
+        ax.set_title(title)
+    extrapolated = _meta_extrapolated(meta) or _frame_extrapolated(df, basis)
     if extrapolated:
         _watermark(fig)
     _stamp(fig, [artifact], [meta], tier, extrapolated)
