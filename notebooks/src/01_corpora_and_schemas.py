@@ -536,23 +536,53 @@ print(f"{SNAP_A}: {n_canon_a} canonical rows | {SNAP_B}: {n_canon_b} canonical r
 
 # %%
 # The verbatim check, on real data this time: how many street values kept raw space padding?
+# Real street text is masked for display per DATA_GOVERNANCE.md (aggregates only in shipped
+# outputs): every non-space character becomes 'x', every space stays verbatim — the padding
+# is the evidence, and it survives the masking untouched.
+
+
+def pad_shape(val: str) -> str:
+    """Padding-only view of a real value: non-space chars -> 'x', spaces verbatim."""
+    return "".join(" " if ch == " " else "x" for ch in str(val))
+
+
 street_a = pd.read_parquet(canon_path_a, columns=["street"])["street"]
 padded = street_a[
     street_a.str.startswith(" ", na=False) | street_a.str.contains("  ", na=False)
 ]
 frac = len(padded) / len(street_a)
 print(f"{len(padded)} of {len(street_a)} street values ({frac:.1%}) carry leading/embedded "
-      "padding, verbatim:")
+      "padding, verbatim (values masked, spacing real):")
 for val in padded.head(3):
-    print(f"  {val!r}")
+    print(f"  {pad_shape(val)!r}")
 if len(padded) == 0:
     print("  (none found in this snapshot - the padding convention did not occur here)")
 
 # %%
-# A 5-row look at the canonical frame itself (columns trimmed for width).
-show_cols = ["record_id", "entity_id", "given_name", "family_name", "age",
-             "street", "city", "zip", "county", "snapshot_date"]
-display(pd.read_parquet(canon_path_a, columns=show_cols).head(5))
+# A 5-row look at the canonical frame itself — masked for display in the same style
+# notebook 03 uses (initials, truncated ids, padding-only street), per DATA_GOVERNANCE.md;
+# the frame on disk holds the verbatim values.
+_prev = pd.read_parquet(
+    canon_path_a,
+    columns=["record_id", "entity_id", "given_name", "family_name", "age",
+             "street", "city", "county", "snapshot_date"],
+).head(5)
+
+
+def _initial(s: pd.Series) -> pd.Series:
+    return s.fillna("").astype(str).str.strip().str.slice(0, 1).replace("", "-") + "."
+
+
+display(pd.DataFrame({
+    "record_id": _prev["record_id"].astype(str).str.slice(0, 4) + "…",
+    "ncid": _prev["entity_id"].astype(str).str.slice(0, 4) + "…",
+    "name": _initial(_prev["given_name"]) + " " + _initial(_prev["family_name"]),
+    "age": _prev["age"].astype(str).str.strip(),
+    "street (padding only)": _prev["street"].map(pad_shape),
+    "city": _prev["city"].astype(str).str.strip(),
+    "county": _prev["county"].astype(str).str.strip(),
+    "snapshot_date": _prev["snapshot_date"].astype(str).str.strip(),
+}))
 
 # %% [markdown]
 # ## 4. Same-person pairs: aligning the two snapshots on `ncid`
@@ -569,7 +599,11 @@ display(pd.read_parquet(canon_path_a, columns=show_cols).head(5))
 # which row is "the" record, and cross-product join rows would be spurious "same-person" pairs
 # biasing the measured noise prevalence, so it excludes the ncid and reports how many. That
 # count is exactly what MET-05 (the ncid-stability gate, notebook 03) needs — so it is displayed
-# here and carried into the `corpus_registry` artifact. Note one reading caveat for the overlap
+# here and carried into the `corpus_registry` artifact. The duplicated-ncid *share* below is
+# computed over **distinct ncids** per snapshot — the same denominator MET-05's G1 clause uses in
+# notebook 03 — so the two notebooks print the same number for the same concept. (An earlier run
+# of this notebook divided the count by *rows*, a ncids-per-row hybrid; the denominator is
+# corrected here.) Note one reading caveat for the overlap
 # number: the
 # county filter means a person who *moved out of the kept counties* between the snapshots leaves
 # the join even though their ncid persists statewide — at smoke/mid the overlap is a
@@ -591,12 +625,16 @@ else:
     align_sidecar.write_text(json.dumps(align_stats) + "\n")
     print(f"aligned -> {ALIGNED.name} in {time.time() - t0:.0f}s")
 
-dup_frac_a = align_stats["dup_ncids_a"] / n_canon_a
-dup_frac_b = align_stats["dup_ncids_b"] / n_canon_b
+n_ncids_a = pd.read_parquet(canon_path_a, columns=["ncid"])["ncid"].nunique()
+n_ncids_b = pd.read_parquet(canon_path_b, columns=["ncid"])["ncid"].nunique()
+dup_frac_a = align_stats["dup_ncids_a"] / n_ncids_a
+dup_frac_b = align_stats["dup_ncids_b"] / n_ncids_b
 overlap = align_stats["pairs"] / min(n_canon_a, n_canon_b)
 print(f"pairs                : {align_stats['pairs']}")
-print(f"dup ncids excluded a : {align_stats['dup_ncids_a']} ({dup_frac_a:.4%} of rows)")
-print(f"dup ncids excluded b : {align_stats['dup_ncids_b']} ({dup_frac_b:.4%} of rows)")
+print(f"dup ncids excluded a : {align_stats['dup_ncids_a']} of {n_ncids_a} distinct ncids "
+      f"({dup_frac_a:.4%})")
+print(f"dup ncids excluded b : {align_stats['dup_ncids_b']} of {n_ncids_b} distinct ncids "
+      f"({dup_frac_b:.4%})")
 print(f"overlap              : {overlap:.1%} of the smaller snapshot")
 
 # %%
@@ -660,7 +698,8 @@ outcome = "CONFIRMED" if all(checks.values()) else "REFUTED"
 evidence = (
     f"requested-set rows: {parse_stats['rows'].to_dict()}; final counties {FINAL_COUNTIES} "
     f"-> rows {n_canon_a} ({SNAP_A}) / {n_canon_b} ({SNAP_B}); duplicated-ncid fraction "
-    f"{dup_frac_a:.4%} / {dup_frac_b:.4%} (dup ncids / rows per side); aligned pairs "
+    f"{dup_frac_a:.4%} / {dup_frac_b:.4%} (dup ncids / distinct ncids per side, MET-05's G1 "
+    f"denominator); aligned pairs "
     f"{align_stats['pairs']} = {overlap:.1%} of the smaller snapshot. Checks: {checks}. "
     f"Recorded decision: {decision}"
     + ("" if size_clause_applies else " Size clause not scored (statewide tier).")

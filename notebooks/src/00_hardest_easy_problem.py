@@ -497,16 +497,38 @@ _verdict_md = cards.verdict_box(
 # The lab's honesty rails forbid quoted wall-clock numbers: any runtime claim in the README
 # or a later notebook must re-render from measured coefficients, and this section is where
 # those coefficients come from. We time four primitive operations on this machine, at this
-# tier, on real data from this run — and we project *nothing*. The registered `smoke_check`
-# artifact is the citation target; PLAN §8's planning estimates are hypotheses these
-# measurements exist to replace.
+# tier, on real data from this run — and we project *nothing*. A single-shot timing on a
+# shared container is hostage to whatever else the machine was doing in that instant, so
+# each coefficient is the **median of 3 repeats** of the same small benchmark body, and the
+# repeat spread (min/max rate) is stored next to it — a citation of a coefficient carries
+# the measurement's own uncertainty. The registered `smoke_check` artifact is the citation
+# target; PLAN §8's planning estimates are hypotheses these measurements exist to replace.
 
 # %%
-t0 = time.perf_counter()
-texts = serialize_frame(sub, text_roles=schema.text_roles())
-t_serialize = time.perf_counter() - t0
-serialize_rows_per_s = len(sub) / t_serialize
-print(f"serialize_frame: {len(sub):,} rows in {t_serialize:.2f}s")
+N_REPEATS = 3  # each coefficient = median over N_REPEATS repeats of the same small body
+
+
+def repeat_timed(fn) -> tuple[object, dict[str, float]]:
+    """Run fn N_REPEATS times; return (last result, {'median','min','max'} seconds)."""
+    times: list[float] = []
+    result = None
+    for _ in range(N_REPEATS):
+        t0 = time.perf_counter()
+        result = fn()
+        times.append(time.perf_counter() - t0)
+    return result, {"median": float(np.median(times)),
+                    "min": float(min(times)), "max": float(max(times))}
+
+
+def rate_spread(n: int, t: dict[str, float]) -> dict[str, float]:
+    """Throughput from repeat timings: median rate plus its min/max spread."""
+    return {"median": n / t["median"], "min": n / t["max"], "max": n / t["min"]}
+
+
+texts, t_serialize = repeat_timed(lambda: serialize_frame(sub, text_roles=schema.text_roles()))
+serialize_rate = rate_spread(len(sub), t_serialize)
+print(f"serialize_frame: {len(sub):,} rows in {t_serialize['median']:.2f}s "
+      f"(median of {N_REPEATS}; {t_serialize['min']:.2f}-{t_serialize['max']:.2f}s)")
 print(f"example serialization:\n  {texts.iloc[0]}")
 
 # %% [markdown]
@@ -523,47 +545,56 @@ encoder = build_encoder(cfg)
 enc_params = int(sum(p.numel() for p in encoder.parameters()))
 enc_texts = texts.iloc[:n_enc].tolist()
 encoder.encode(enc_texts[:8], batch_size=8, device=device, dtype=dtype)  # warm-up
-t0 = time.perf_counter()
-emb = encoder.encode(enc_texts, batch_size=int(cfg.train.batch_size), device=device, dtype=dtype)
-t_encode = time.perf_counter() - t0
-encode_texts_per_s = len(enc_texts) / t_encode
+emb, t_encode = repeat_timed(
+    lambda: encoder.encode(enc_texts, batch_size=int(cfg.train.batch_size),
+                           device=device, dtype=dtype)
+)
+encode_rate = rate_spread(len(enc_texts), t_encode)
 print(
     f"CharByteEncoder (untrained, {enc_params:,} params, dim {emb.shape[1]}, "
-    f"device {device.type}): {len(enc_texts)} texts in {t_encode:.2f}s"
+    f"device {device.type}): {len(enc_texts)} texts in {t_encode['median']:.2f}s "
+    f"(median of {N_REPEATS}; {t_encode['min']:.2f}-{t_encode['max']:.2f}s)"
 )
 
 # %%
-t0 = time.perf_counter()
-bm25_pairs = sparse.candidates(sub, texts, k=BM25_K)
-t_bm25 = time.perf_counter() - t0
-bm25_records_per_s = len(sub) / t_bm25
-print(f"BM25 build+query (k={BM25_K}): {len(sub):,} records in {t_bm25:.2f}s")
+bm25_pairs, t_bm25 = repeat_timed(lambda: sparse.candidates(sub, texts, k=BM25_K))
+bm25_rate = rate_spread(len(sub), t_bm25)
+print(f"BM25 build+query (k={BM25_K}): {len(sub):,} records in {t_bm25['median']:.2f}s "
+      f"(median of {N_REPEATS}; {t_bm25['min']:.2f}-{t_bm25['max']:.2f}s)")
 
-t0 = time.perf_counter()
-mk_pairs = matchkeys.candidates(sub)
-t_matchkeys = time.perf_counter() - t0
-matchkeys_pairs_per_s = len(mk_pairs) / t_matchkeys
-print(f"matchkeys: {len(mk_pairs):,} pairs in {t_matchkeys:.2f}s")
+mk_pairs, t_matchkeys = repeat_timed(lambda: matchkeys.candidates(sub))
+matchkeys_rate = rate_spread(len(mk_pairs), t_matchkeys)
+print(f"matchkeys: {len(mk_pairs):,} pairs in {t_matchkeys['median']:.2f}s "
+      f"(median of {N_REPEATS}; {t_matchkeys['min']:.2f}-{t_matchkeys['max']:.2f}s)")
 
 # %%
 smoke_check = {
     "platform": describe_platform(),
     "tier": TIER,
     "device": device.type,
+    "coefficient_repeats": N_REPEATS,  # each *_per_s is the median; *_spread is [min, max]
     "measured": {
-        "serialize_rows_per_s": float(serialize_rows_per_s),
+        "serialize_rows_per_s": float(serialize_rate["median"]),
+        "serialize_rows_per_s_spread": [float(serialize_rate["min"]),
+                                        float(serialize_rate["max"])],
         "serialize_n_rows": len(sub),
-        "charbyte_encode_texts_per_s": float(encode_texts_per_s),
+        "charbyte_encode_texts_per_s": float(encode_rate["median"]),
+        "charbyte_encode_texts_per_s_spread": [float(encode_rate["min"]),
+                                               float(encode_rate["max"])],
         "charbyte_encode_n_texts": len(enc_texts),
         "charbyte_encode_batch_size": int(cfg.train.batch_size),
         "charbyte_params": enc_params,
         "charbyte_dim": int(emb.shape[1]),
         "charbyte_untrained": True,
-        "bm25_build_query_records_per_s": float(bm25_records_per_s),
+        "bm25_build_query_records_per_s": float(bm25_rate["median"]),
+        "bm25_build_query_records_per_s_spread": [float(bm25_rate["min"]),
+                                                  float(bm25_rate["max"])],
         "bm25_n_records": len(sub),
         "bm25_k": int(BM25_K),
         "bm25_n_pairs": len(bm25_pairs),
-        "matchkeys_pairs_per_s": float(matchkeys_pairs_per_s),
+        "matchkeys_pairs_per_s": float(matchkeys_rate["median"]),
+        "matchkeys_pairs_per_s_spread": [float(matchkeys_rate["min"]),
+                                         float(matchkeys_rate["max"])],
         "matchkeys_n_pairs": len(mk_pairs),
         "matchkeys_n_records": len(sub),
         "quickstart_runtime_s": float(runtime_s),
@@ -574,26 +605,35 @@ registry.register(
     smoke_check,
     cfg=cfg,
     tier=cfg.run.tier,
-    meta={"note": "measured throughput coefficients; the only citable wall-clock source"},
+    meta={"note": "measured throughput coefficients (median of "
+                  f"{N_REPEATS} repeats, min/max spread stored); "
+                  "the only citable wall-clock source"},
 )
 coeff_table = pd.DataFrame(
     [
-        ("serialize_frame", serialize_rows_per_s, "rows/s", len(sub)),
-        ("CharByteEncoder.encode (untrained)", encode_texts_per_s, "texts/s", len(enc_texts)),
-        (f"BM25 build+query (k={BM25_K})", bm25_records_per_s, "records/s", len(sub)),
-        ("matchkeys blocking", matchkeys_pairs_per_s, "pairs/s", len(mk_pairs)),
-        ("quickstart end-to-end", runtime_s, "s wall-clock", len(sub)),
+        ("serialize_frame", serialize_rate["median"], serialize_rate["min"],
+         serialize_rate["max"], "rows/s", len(sub)),
+        ("CharByteEncoder.encode (untrained)", encode_rate["median"], encode_rate["min"],
+         encode_rate["max"], "texts/s", len(enc_texts)),
+        (f"BM25 build+query (k={BM25_K})", bm25_rate["median"], bm25_rate["min"],
+         bm25_rate["max"], "records/s", len(sub)),
+        ("matchkeys blocking", matchkeys_rate["median"], matchkeys_rate["min"],
+         matchkeys_rate["max"], "pairs/s", len(mk_pairs)),
+        ("quickstart end-to-end", runtime_s, np.nan, np.nan, "s wall-clock (single run)",
+         len(sub)),
     ],
-    columns=["coefficient", "value", "unit", "n_measured"],
+    columns=["coefficient", "median", "min", "max", "unit", "n_measured"],
 )
 display(coeff_table)
 print(
-    f"Measured on this machine, this run (tier={TIER}, device={device.type}). These are\n"
-    "coefficients, not projections: later notebooks and the README cite the registered\n"
-    "smoke_check artifact instead of quoting wall-clock folklore. Nothing on this table\n"
-    "says anything about 1e9 — the cost model that does (SCL-03, notebook 15) is built\n"
-    "from measured coefficients like these and is labeled EXTRAPOLATED wherever it leaves\n"
-    "measurement behind."
+    f"Measured on this machine, this run (tier={TIER}, device={device.type}); each\n"
+    f"coefficient is the median of {N_REPEATS} repeats with its min/max spread alongside —\n"
+    "on a shared container a single-shot timing can swing several-fold with ambient load,\n"
+    "so cite the median WITH its spread. These are coefficients, not projections: later\n"
+    "notebooks and the README cite the registered smoke_check artifact instead of quoting\n"
+    "wall-clock folklore. Nothing on this table says anything about 1e9 — the cost model\n"
+    "that does (SCL-03, notebook 15) is built from measured coefficients like these and is\n"
+    "labeled EXTRAPOLATED wherever it leaves measurement behind."
 )
 
 # %% [markdown]
@@ -647,7 +687,9 @@ print(
 # blocking pair-completeness the measured ceiling — exact numbers, with entity-bootstrap
 # CIs, in `quickstart_dedup` and stamped on the figure above. This machine's measured
 # throughput coefficients (serialization, untrained byte-encoder encode, BM25 build+query,
-# matchkey pair generation) are registered in `smoke_check`.
+# matchkey pair generation) are registered in `smoke_check` — each as the median of
+# repeated timings with its min/max spread stored alongside, so a citation carries the
+# measurement's own uncertainty.
 #
 # **What this changes downstream.** `smoke_check` becomes the only legitimate source for
 # wall-clock and cost statements (the README quickstart claim re-renders from it; SCL-03's

@@ -451,15 +451,37 @@ _ = cards.verdict_box(
     registry=registry,
 )
 
+# %%
+# What did each metric CHARGE for the one constructed merge? Computed, not asserted:
+# pairwise counts the cross-pairs of the fused entities (s_a * s_b), B-cubed spreads the
+# error over the records touched (s_a + s_b), GMD prices the repair (operations to fix).
+s_a, s_b = int(ent_sizes[top2[0]]), int(ent_sizes[top2[1]])
+gmd_ops = round(float(con["gmd"]))
+merge_charge = pd.DataFrame(
+    [
+        ("pairwise (cross-pairs charged)", s_a * s_b, "record pairs"),
+        ("B-cubed (records touched)", s_a + s_b, "records"),
+        ("GMD (repair operations)", gmd_ops, "merge ops"),
+    ],
+    columns=["metric view", "charge", "unit"],
+)
+display(merge_charge)
+charge_ratio = (s_a * s_b) / max(gmd_ops, 1)
+print(f"one merge of entities sized {s_a} and {s_b}: charged {s_a}x{s_b} = {s_a * s_b} "
+      f"cross-pairs by the pair view vs {gmd_ops} repair operation(s) by GMD — "
+      f"a {charge_ratio:.0f}x ({np.log10(charge_ratio):.1f} orders of magnitude) "
+      f"disagreement about the same mistake.")
+
 # %% [markdown]
 # ### What the constructed output teaches
 #
 # The one-bad-merge output — truth, except two people fused — ranks near-perfect under
 # *every* partition metric at this corpus size, but look at what each metric charged for the
-# identical error (values in the table above): GMD counts it as a single repair operation;
-# B-cubed dilutes it over the merged records; pairwise F1 charges every cross-pair of the
-# fused entities. Three orders of magnitude of disagreement about the *same mistake* — on a
-# corpus whose largest entities hold a couple dozen records. Scale those entities up and the
+# identical error (computed in the cell above): GMD counts it as a single repair operation;
+# B-cubed dilutes it over the ~40 merged records; pairwise F1 charges every cross-pair of
+# the fused entities — a ~440x disagreement, more than two orders of magnitude, about the
+# *same mistake* — on a corpus whose largest entities hold a couple dozen records. Scale
+# those entities up and the
 # pair-counted charge grows quadratically while the record-averaged charge grows linearly:
 # at national scale, one hub-glued mega-cluster can dominate an evaluation under one metric
 # and vanish under another. That asymmetry is why this lab reports **entity-level metrics as

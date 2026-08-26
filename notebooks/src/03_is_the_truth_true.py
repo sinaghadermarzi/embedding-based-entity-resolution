@@ -466,9 +466,10 @@ def draw_audit(ax, df, meta):
             ax.annotate("0 observed; 95% upper bound", (row["ci_high"], i),
                         textcoords="offset points", xytext=(6, -3), fontsize=7, color="0.35")
     # thresholds come from the artifact itself — the figure draws nothing the table does not hold
+    # (labels sit at the top of the axes so they cannot collide with the x tick labels below)
     for _, g in df.loc[df["gate"] != "", ["gate", "threshold"]].drop_duplicates().iterrows():
         ax.axvline(g["threshold"], color="0.55", linestyle="--", linewidth=1)
-        ax.annotate(f"{g['gate']} < {g['threshold']:.1%}", (g["threshold"], len(df) - 0.4),
+        ax.annotate(f"{g['gate']} < {g['threshold']:.1%}", (g["threshold"], -0.45),
                     rotation=90, fontsize=7, color="0.35", ha="right", va="top")
     ax.set_yticks(range(len(df)), labels)
     ax.set_xscale("log")
@@ -546,9 +547,10 @@ else:
 # lit_review §4). The unresolvable fraction is a property of the **field set**, so it is measured
 # per field set, from names alone up to every declared role. And NC starts with a handicap the
 # lab must carry everywhere: **the snapshots contain no full date of birth** — only `age` in
-# years, ~100 distinct values where a DOB would offer tens of thousands. Every NC-based metric in
-# this lab is conditioned on that ceiling (the full-DOB contrast arrives with the Ohio linkage in
-# ADP-02).
+# years, on the order of a hundred distinct values (the exact count is printed with the
+# identifiability corpus below) where a DOB would offer tens of thousands. Every NC-based metric
+# in this lab is conditioned on that ceiling (the full-DOB contrast arrives with the Ohio linkage
+# in ADP-02).
 #
 # One definitional honesty note before the card: "different people" below means **different
 # NCIDs** — the very key section 2 just audited. Unresolvability measured against an imperfect key
@@ -606,8 +608,11 @@ ident_frame["record_id"] = (
     ident_frame["county_id"].str.strip() + ":" + ident_frame["record_id"].astype(str)
 )
 assert not ident_frame["record_id"].duplicated().any(), "county:regnum must be unique"
+n_distinct_ages = int(ident_frame["age"].nunique())
 print(f"identifiability corpus: snapshot {IDENT_SNAP}, {len(ident_frame)} records, "
       f"{ident_frame['entity_id'].nunique()} distinct ncids")
+print(f"distinct age values: {n_distinct_ages} — all the birth-date resolution the file "
+      f"offers, where a full DOB would offer tens of thousands of distinct values")
 
 # %%
 met06_rows = []

@@ -34,7 +34,12 @@ NOTEBOOK_DAG: dict[str, dict[str, list[str]]] = {
     },
     "01_corpora_and_schemas.ipynb": {
         "requires": [],
-        "produces": ["corpus_registry", "declared_schemas"],
+        "produces": [
+            "corpus_registry",
+            "declared_schemas",
+            "nc_snapshot_listing",
+            "nc_align_summary",
+        ],
     },
     "02_how_to_tell_who_won.ipynb": {
         "requires": ["corpus_registry"],
@@ -46,7 +51,7 @@ NOTEBOOK_DAG: dict[str, dict[str, list[str]]] = {
     },
     "03_is_the_truth_true.ipynb": {
         "requires": ["corpus_registry"],
-        "produces": ["met05_ncid_audit", "met06_identifiability"],
+        "produces": ["met05_ncid_audit", "met06_identifiability", "met05_adjudication_plan"],
     },
     "04_auditing_real_noise.ipynb": {
         "requires": ["corpus_registry"],
