@@ -877,6 +877,11 @@ OV_ALREADY = float((SYSTEMS["embedding"][_ov] >= _t99_emb).mean()) if _ov.sum() 
 print(f"override redundancy: {OV_ALREADY:.2%} of the {int(_ov.sum()):,} override fires are "
       f"ALREADY at/above the embedding-only precision@{PREC_PRIMARY} threshold "
       f"({_t99_emb:.4f}) — the share of the override's work the embedding does anyway")
+print(f"feature-floor inertness check: the pre-registered floor {P_FLOOR} sits "
+      f"{'BELOW' if P_FLOOR < _t99_emb else 'above'} the embedding's own "
+      f"precision@{PREC_PRIMARY} threshold {_t99_emb:.4f} — a floor below the operating "
+      "threshold cannot flip any link decision there, so emb+feature can only differ from "
+      "embedding-only through threshold re-selection (read its delta with that in mind)")
 
 delta_rows: list[dict] = []
 _emb_pred = pred_at("embedding", T_AT[("embedding", PREC_PRIMARY)])
@@ -1605,6 +1610,14 @@ display(auc_df[["regime", "system", "auc", "auc_lo", "auc_hi", "rank", "n_pairs"
                 "pos_rate"]].round(4))
 for regime, order in RANKINGS.items():
     print(f"  {regime:>16}: " + " > ".join(order))
+_ops_p = ops[(ops["protocol"] == f"precision@{PREC_PRIMARY}") & ops["system"].isin(HEAT_SYSTEMS)]
+_ent_cal = " > ".join(_ops_p.sort_values("f1", ascending=False)["system"])
+_ent_gen = " > ".join(pd.DataFrame(gen_entity_rows).sort_values("f1", ascending=False)["system"])
+print("metric-choice caution (MET-01/02's reversal, live): the pair-AUC ranking above is "
+      "NOT the protocol's entity ranking — at the fixed-precision operating point the "
+      f"same systems rank {_ent_cal} (calibrated) and {_ent_gen} (generic). NSE-03 is "
+      "scored on the pair-level ranking because the NC regime supports nothing else; the "
+      "entity_op rows carry the primary-protocol view where it exists.")
 tick("§9c NC scoring + AUC table", t_sec)
 
 # %%
@@ -1730,7 +1743,11 @@ _ = verdict_box(
         f"per-regime: {_adj_ok}); sign-stable cross-regime reversal: {_rev}. The NC regime "
         f"is PAIR-LEVEL ONLY ({n_pos:,} same-NCID positives + {len(neg_u) + len(neg_f):,} "
         "sampled cross-NCID negatives, half same-family hard negatives; no entity "
-        "structure, values casefolded, aggregates only). Stated limitations: pair-resample "
+        "structure, values casefolded, aggregates only). Metric-choice caution: at the "
+        f"entity fixed-precision operating point the synthetic-regime ranking is "
+        f"{_ent_cal} (calibrated) / {_ent_gen} (generic) — MET-01's pair-vs-entity "
+        "reversal, live in the entity_op rows; the invariance scored here is pair-level "
+        "by necessity, not by preference. Stated limitations: pair-resample "
         "CIs ignore entity clustering in the two synthetic regimes; the calibrated map "
         "transfers to NC unvalidated (AUC is rank-only, so the monotone map cannot change "
         "it); the FS stand-in proxies the tuned FS (spearman "
@@ -1760,6 +1777,12 @@ print(f"raw_unparse at rate 1.0: {_n_unparsed:,}/{len(eval_full):,} records lost
       f"parsed name fields into full_name ({len(raw_ops):,} logged cell edits; records "
       "missing given or family name keep their original fields — reported, not hidden)")
 print(f"raw serialization roles (eval-time deviation the raw regime forces): {RAW_ROLES}")
+_kept_native = int(len(eval_full) - _n_unparsed)
+print(f"stale-full_name caveat (NB08's leak, resurfacing): {_kept_native:,} records "
+      f"({_kept_native / len(eval_full):.1%}) could not be re-composed (a name part "
+      "missing) and keep their NATIVE full_name — for generated duplicates that value is "
+      "the clean pre-noise composition, so the raw embedding arm sees leaked clean names "
+      "on exactly those records; any raw-arm gain must be read with this leak in mind")
 
 RAW_RECS = raw_eval.set_index(raw_eval["record_id"].astype(str))
 ar_raw = RAW_RECS.loc[upairs["a"]].reset_index(drop=True)
@@ -1908,8 +1931,11 @@ _ = verdict_box(
         f"[{_dnd_boot_lo:+.4f}, {_dnd_boot_hi:+.4f}]. Caveats carried: "
         "pair-level AUC only, pair-resample CIs, the raw embedding arm re-serializes with "
         "full_name (an eval-time field-set deviation the regime forces, stated in the "
-        "card), and the encoder never trained on raw-form strings — a raw-trained encoder "
-        "is the mid-tier follow-up this exploratory arm motivates, not a claim it makes. "
+        f"card), {_kept_native:,} un-recomposable records ({_kept_native / len(eval_full):.1%}) "
+        "keep a stale NATIVE full_name — a clean-name leak into the raw embedding arm "
+        "(NB08's leak mechanism, quantified above) — and the encoder never trained on "
+        "raw-form strings; a raw-trained encoder on a leak-free composition is the "
+        "mid-tier follow-up this exploratory arm motivates, not a claim it makes. "
         "SINGLE-SEED EXPLORATORY DEMONSTRATION — never an adoption gate (PLAN §3)."
     ),
     registry=registry,
@@ -1942,10 +1968,10 @@ else:
                                  + _n_mid / ENC_RATE * len(REGIME_MIXES))) / 3600
     print(f"[RUN-IN-TARGET mac] HYB-01 regime map at tier=mid (~{_n_mid:.0e} records), "
           f"priced from THIS run's coefficients:")
-    print(f"  per regime here: generate {_gen_s:.0f}s, encode "
-          f"{np.mean([s['encode'] for s in REGIME_SECS.values()]):.0f}s "
-          f"({ENC_RATE:,.0f} rec/s), per-system sweep+CIs {_cell_s * 3:.0f}s "
-          f"(grid {REG_GRID}, {N_BOOT} boots)")
+    print(f"  per regime here: generate {_gen_s:.1f}s, encode "
+          f"{np.mean([s['encode'] for s in REGIME_SECS.values()]):.1f}s "
+          f"({ENC_RATE:,.0f} rec/s), sweeps+CIs+paired deltas {_cell_s * 3:.1f}s "
+          f"for 3 systems (grid {REG_GRID}, {N_BOOT} boots)")
     print(f"  mid, {_seeds} seeds x {_draws} noise draws (met04 pilot design) x "
           f"{len(REGIME_MIXES)} regimes x 3 systems = {_seeds * _draws * _cells} cells: "
           f"~{_mid_h:.1f} container-hours if coefficients scale ~linearly in records; "
@@ -1979,6 +2005,11 @@ for system in ("emb+override", "emb+guard", "emb+feature", "hybrid_all"):
           f"[{r['delta_lo']:+.4f}, {r['delta_hi']:+.4f}] vs embedding-only -> {verdict}")
 print(f"  ranking invariance: {nse03_outcome} across calibrated / generic / real NC drift "
       f"({' > '.join(RANKINGS['calibrated'])} on the calibrated slice)")
+print(f"  cross-regime nuance: on REAL NC drift the guard's true-pair collateral is "
+      f"{float(nc_label[nc_fires['guard']].mean()):.4f} (vs "
+      f"{float(UP_TRUE[FIRES['guard']].mean()):.4f} on the synthetic corpus, where the "
+      "native dob errors exceed the gap) — consistent with the guard's harm being "
+      "corpus-native dob noise rather than a property of guards; tier=mid adjudicates")
 print(f"  parsing factorial (EXPLORATORY): {prs01_outcome} — fs drop "
       f"{_fs_drop['delta']:+.4f} vs emb drop {_emb_drop['delta']:+.4f} parsed->raw")
 print(f"  cards: HYB-01 {hyb01_outcome} | NSE-03 {nse03_outcome} | PRS-01 {prs01_outcome}")
