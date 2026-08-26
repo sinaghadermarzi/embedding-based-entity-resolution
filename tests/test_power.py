@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 from pytest import approx
 
-from er_lab.eval.power import power_table, seeds_needed, variance_components
+from er_lab.eval.power import detect_bar, power_table, seeds_needed, variance_components
 
 
 def planted_grid(
@@ -115,6 +115,49 @@ def test_power_table_known_answers_and_monotonicity() -> None:
     assert seed_only["sd_replicate"].iloc[0] == approx(0.01)
     with pytest.raises(ValueError, match="var_components"):
         power_table([0.01], {"seed": float("nan"), "noise_draw": 0.0})
+
+
+def test_detect_bar_known_answers_both_variants() -> None:
+    vc = {"seed": 5e-5, "noise_draw": 5e-5, "residual": 1e-3}
+    # exclusive (the pre-registered MET-04-card formula): sigma2 = 1e-4
+    #   -> 2*sqrt(2e-4) = 2*sqrt(2)*0.01 = 0.0282842712...
+    assert detect_bar(vc, include_residual=False) == approx(2 * np.sqrt(2) * 0.01, rel=1e-12)
+    assert detect_bar(vc, include_residual=False) == approx(0.0282843, abs=1e-6)
+    # residual-inclusive (default): sigma2 = 1.1e-3 -> 2*sqrt(2.2e-3) = 0.0938083...
+    assert detect_bar(vc) == approx(2 * np.sqrt(2 * 1.1e-3), rel=1e-12)
+    assert detect_bar(vc) == approx(0.0938083, abs=1e-6)
+    # residual run-level noise does not cancel between independently trained arms,
+    # so the inclusive bar is strictly wider whenever residual > 0
+    assert detect_bar(vc) > detect_bar(vc, include_residual=False)
+    # the MET-04 smoke pilot's measured components (NB09), as a regression anchor
+    met04 = {"seed": 5.90e-5, "noise_draw": 3.88e-6, "residual": 7.37e-5}
+    assert detect_bar(met04, include_residual=False) == approx(0.02243, abs=2e-4)
+    assert detect_bar(met04) == approx(0.03306, abs=2e-4)
+
+
+def test_detect_bar_key_handling_and_validation() -> None:
+    # one missing seed/noise key counts as 0 (a pilot without that factor)
+    assert detect_bar({"seed": 1e-4, "residual": 0.0}) == approx(2 * np.sqrt(2e-4))
+    assert detect_bar({"noise_draw": 1e-4, "residual": 0.0}) == approx(2 * np.sqrt(2e-4))
+    # renamed factor columns work through the explicit keys
+    assert detect_bar(
+        {"training_seed": 5e-5, "noise": 5e-5, "residual": 1e-3},
+        seed_key="training_seed", noise_key="noise",
+    ) == approx(2 * np.sqrt(2 * 1.1e-3))
+    # both keys absent with other components present = naming mismatch, never sigma=0
+    with pytest.raises(ValueError, match="naming mismatch"):
+        detect_bar({"training_seed": 1e-4, "residual": 1e-3})
+    # residual-inclusive bar refuses to silently degrade when residual is absent
+    with pytest.raises(ValueError, match="residual"):
+        detect_bar({"seed": 1e-4, "noise_draw": 1e-4})
+    # ...but the exclusive variant does not need it
+    assert detect_bar({"seed": 5e-5, "noise_draw": 5e-5}, include_residual=False) == approx(
+        2 * np.sqrt(2) * 0.01
+    )
+    with pytest.raises(ValueError, match=">= 0"):
+        detect_bar({"seed": -1e-4, "noise_draw": 0.0, "residual": 0.0})
+    with pytest.raises(ValueError, match=">= 0"):
+        detect_bar({"seed": 1e-4, "noise_draw": 0.0, "residual": float("nan")})
 
 
 def test_power_table_rejects_factor_naming_mismatch() -> None:

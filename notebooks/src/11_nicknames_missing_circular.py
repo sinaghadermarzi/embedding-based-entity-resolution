@@ -49,6 +49,7 @@
 
 # %%
 import copy
+import hashlib
 import time
 
 import jellyfish
@@ -60,7 +61,7 @@ from sklearn.metrics import roc_auc_score
 from er_lab.blocking import ann, matchkeys
 from er_lab.cluster.schemes import transitive_closure
 from er_lab.config import REPO_ROOT, config_hash, load_config_from_env, set_all_seeds
-from er_lab.data.schema import NON_TEXT_ROLES, ROLES
+from er_lab.data.schema import ROLES
 from er_lab.eval.bootstrap import bootstrap_ci, paired_delta
 from er_lab.eval.metrics import pairwise
 from er_lab.eval.operating_points import find_threshold_for_precision
@@ -168,6 +169,12 @@ if registry.exists("met04_power_table", tier=cfg.run.tier):
     met04_tbl, met04_meta = registry.load("met04_power_table", tier=cfg.run.tier)
     SD_REPLICATE = float(met04_meta["extra"]["sd_replicate"])
     DETECT_BAR = float(met04_meta["extra"]["detect_bar_single_seed"])
+    # both registered bars travel: the cards' pre-registered 2*sqrt(2)*sd_replicate bar
+    # scores each verdict; the residual-inclusive bar is the primary honest noise lens
+    # (residual run-level noise does not cancel between independently trained arms)
+    DETECT_BAR_RESID = float(
+        met04_meta["extra"].get("detect_bar_residual_inclusive", DETECT_BAR)
+    )
     _pw = met04_tbl[met04_tbl["kind"] == "power"]
     SEEDS_NEEDED = {float(r["delta"]): int(r["seeds_needed"]) for _, r in _pw.iterrows()}
     BAR_SOURCE = (f"met04_power_table run {met04_meta['created_at']} "
@@ -175,13 +182,15 @@ if registry.exists("met04_power_table", tier=cfg.run.tier):
 else:
     SD_REPLICATE = 0.01  # the MET-04 card's pre-registered variance floor
     DETECT_BAR = float(2.0 * np.sqrt(2.0) * SD_REPLICATE)
+    DETECT_BAR_RESID = DETECT_BAR  # provisional: no measured residual component exists yet
     SEEDS_NEEDED = {}
     BAR_SOURCE = ("PROVISIONAL — met04_power_table is not registered at this tier "
                   "(notebook 09 not yet run here); using the MET-04 card's predicted "
                   "variance floor sd=0.01 until the measured table exists")
     print("!! " + BAR_SOURCE)
-print(f"MET-04 lens: sd_replicate={SD_REPLICATE:.4f} -> single-seed bar "
-      f"2*sqrt(2)*sd = {DETECT_BAR:.4f}   [{BAR_SOURCE}]")
+print(f"MET-04 lens: sd_replicate={SD_REPLICATE:.4f} -> single-seed bars: "
+      f"pre-registered 2*sqrt(2)*sd = {DETECT_BAR:.4f}, residual-inclusive "
+      f"{DETECT_BAR_RESID:.4f} (primary honest lens)   [{BAR_SOURCE}]")
 
 # %% [markdown]
 # ## 1. The arena, and the one recipe every encoder is judged by
@@ -258,9 +267,14 @@ print(f"eval  slice: {len(ev_slice):,} records / {ev_slice['entity_id'].nunique(
       "entities — fixed across ALL arms (paired)")
 
 # %%
-# Serialization + the shared recipe. TEXT_ROLES through the same role rule the training
-# loop uses; per-arm scheme/missing because serialization IS a factor in this notebook.
-TEXT_ROLES = [c for c in corpus.columns if c in ROLES and c not in NON_TEXT_ROLES]
+# Serialization + the shared recipe. TEXT_ROLES is notebook 08's explicit list,
+# inherited — full_name EXCLUDED per NB08's measured decision (it doubles serialized
+# bytes into certain truncation at max_len=128, and the noise channels leave it STALE,
+# leaking the clean name back through a side channel). Frames handed to the training
+# loop are trimmed to the same set below; per-arm scheme/missing because serialization
+# IS a factor in this notebook.
+TEXT_ROLES = ["given_name", "family_name", "dob", "city", "zip", "sex"]
+EXCLUDED_ROLES = [c for c in corpus.columns if c in ROLES and c not in TEXT_ROLES]
 SER_SCHEME, SER_MISSING = str(cfg.serialize.scheme), str(cfg.serialize.missing)
 
 
@@ -278,6 +292,8 @@ lens = np.array([len(t.encode("utf-8")) for t in EVAL_TEXTS])
 share_trunc = float((lens > cfg.model.max_len - 1).mean())
 print(f"serialization default: scheme={SER_SCHEME} missing={SER_MISSING}, "
       f"roles={TEXT_ROLES}")
+print(f"  role columns excluded from serialization (NB08's measured decision, see above): "
+      f"{EXCLUDED_ROLES}")
 print(f"eval text length: median {int(np.median(lens))} bytes; {share_trunc:.0%} exceed "
       f"max_len={cfg.model.max_len} and are TRUNCATED — the notebook-08-measured smoke "
       "constraint, carried into every battery reading below (mid-tier window covers "
@@ -290,6 +306,14 @@ def fresh_encoder(seed: int, model_cfg=None):
     return build_encoder(model_cfg if model_cfg is not None else cfg)
 
 
+def param_hash(module) -> str:
+    """12-hex digest of all parameters in state_dict order — init-identity checks (NB08)."""
+    h = hashlib.sha256()
+    for tensor in module.state_dict().values():
+        h.update(tensor.detach().cpu().numpy().tobytes())
+    return h.hexdigest()[:12]
+
+
 def train_arm(corpus_df, *, seed, arm_cfg=None, encoder=None):
     """One budget-matched run (infonce / in-batch / no augmentation) with its cfg.
 
@@ -297,9 +321,16 @@ def train_arm(corpus_df, *, seed, arm_cfg=None, encoder=None):
     the pressures under test here are the *pair supply* (TRN-06: which positives exist;
     LABEL-PROV: who labeled them) and the *serialization* (TRN-05 factor via arm_cfg) —
     everything else identical. Asserts the step budget from the returned history.
+    Returns (encoder, history, secs, init_hash): the pre-training param hash makes the
+    'identical init' claim checkable, not assumed (NB08's rail). The frame is trimmed
+    to TEXT_ROLES-bearing columns so the loop serializes the same field set as eval.
     """
+    corpus_df = corpus_df.drop(
+        columns=[c for c in corpus_df.columns if c in ROLES and c not in TEXT_ROLES]
+    )
     use_cfg = arm_cfg if arm_cfg is not None else cfg
     enc = fresh_encoder(seed, use_cfg) if encoder is None else encoder
+    init_hash = param_hash(enc)
     t0 = time.time()
     enc, hist = train_encoder(
         enc, corpus_df, use_cfg, loss_name="infonce", miner_name="inbatch",
@@ -310,7 +341,7 @@ def train_arm(corpus_df, *, seed, arm_cfg=None, encoder=None):
         f"budget violation: expected exactly {STEPS} optimizer steps, "
         f"history shows {len(hist)}"
     )
-    return enc, hist, secs
+    return enc, hist, secs, init_hash
 
 
 def system_metric(encoder, *, label, frame=None, texts=None, with_ci=True) -> dict:
@@ -379,22 +410,26 @@ tick("§1 arena + shared recipe", t_sec)
 #    0.99-precision operating point. A small helper recomputes slice cosines pair-by-pair
 #    (a `battery_report(return_pairs=True)` option would serve — package-gap note).
 # 2. **The full-name staleness gap, and planted confusables.** The nickname channel swaps
-#    `given_name` but leaves `full_name` stale (documented NB05 behavior), so the standard
-#    `nickname_swap` battery slice shows the encoder an *unchanged* full name on both
-#    sides — easier than a real nickname variant. We keep that slice for cross-notebook
-#    comparability AND build a sharper `nickname_fullsync` slice with `full_name` synced.
+#    `given_name` but leaves `full_name` stale (documented NB05 behavior). Under NB08's
+#    inherited serialization `full_name` never reaches the encoder at all (§1), so the
+#    stale clean name can no longer leak through the text — the standard `nickname_swap`
+#    slice and the `nickname_fullsync` slice (full_name synced before serialization)
+#    should now read alike. Both are kept: the fullsync slice is the one the TRN-06 card
+#    names, and their agreement is itself a check that the leakage channel is closed.
 #    On the must-not side, the sharpest instrument is not synthetic at all: the calibrated
 #    corpus *planted* 649 household confusables (twin/sibling records haunting a real
 #    entity, `calibrated_corpus_ops` log), and the eval half carries their pairings with
 #    the entities they haunt — real must-not-merge pairs with fully consistent fields.
 #
-# One slice is empty *by construction* and stays that way: `historical_50k` declares no
-# `name_suffix` role, so the battery's `suffix_jr_sr` perturbation cannot change the
-# serialized text and every probe pair is dropped — same convention as the
-# order-invariant `field_order_permutation` emptiness in notebooks 08/09: the emptiness
-# is information, not an error. On this corpus the Jr–Sr confusable question rides on
-# the twin/birth-year slices and the planted household pairs; the suffix slice becomes
-# measurable on suffix-bearing corpora (ONC/BPID, notebook 18).
+# 3. **A role-admitting probe serializer (NB08's design, adopted).** `historical_50k`
+#    declares no `name_suffix` role, but the battery's `suffix_jr_sr` slice *injects*
+#    one — so the probe serializer must admit the injected role and honor the probe's
+#    own field order (exactly NB08's `PROBE_ROLE_SET` serializer, under which both the
+#    suffix and field-order slices were live by deliberate design). With the fixed-role
+#    serializer this notebook first used, the suffix slice was silently empty and the
+#    card's Jr–Sr guard structurally unmeasurable — a serializer choice, not a corpus
+#    fact. Adopted here: `suffix_jr_sr` (and `field_order_permutation`) are live
+#    eval-time probes, measured under each arm.
 
 # %%
 t_sec = time.time()
@@ -414,8 +449,18 @@ print(lex_note + " — English-centric with documented provenance bias (PLAN §4
 NICK_CHANNEL = nickname(LEXICON)
 
 
+PROBE_ROLE_SET = set(TEXT_ROLES) | {"name_suffix"}
+
+
 def probe_serialize(row: dict) -> str:
-    return serialize_record(row, text_roles=TEXT_ROLES, scheme=SER_SCHEME, missing=SER_MISSING)
+    """NB08's role-admitting probe serializer, honoring the probe's own field order.
+
+    Keeps the field-order slice live (serialize_record itself is order-fixed by
+    text_roles) and admits the battery's injected name_suffix role, so the
+    suffix_jr_sr guard is measurable on this corpus.
+    """
+    roles = [k for k in row if k in PROBE_ROLE_SET]
+    return serialize_record(row, text_roles=roles, scheme=SER_SCHEME, missing=SER_MISSING)
 
 
 PROBES = build_probe_set(
@@ -843,7 +888,7 @@ arm_state: dict[str, dict] = {}
 
 def run_trn06_arm(arm: str, frame: pd.DataFrame) -> dict:
     """Train + fully instrument one TRN-06 arm; returns the matrix row."""
-    enc_a, hist_a, secs = train_arm(frame, seed=PRIMARY_SEED)
+    enc_a, hist_a, secs, ihash = train_arm(frame, seed=PRIMARY_SEED)
     sysrow = system_metric(enc_a, label=f"trn06/{arm}")
     rep, raw = slice_panel(enc_a)
     geo, geo_emb = geometry_panel(enc_a)
@@ -861,7 +906,8 @@ def run_trn06_arm(arm: str, frame: pd.DataFrame) -> dict:
         "factor": "nickname_supervision", "arm": arm,
         "scheme": SER_SCHEME, "missing": SER_MISSING, "eval_regime": "standard",
         "seed": PRIMARY_SEED, "steps": len(hist_a), "batch": BATCH,
-        "train_secs": secs, "reuse_of": None,
+        "train_secs": secs, "reuse_of": None, "init_hash": ihash,
+        "first_train_loss": float(hist_a["loss"].iloc[0]),
         "final_train_loss": float(hist_a["loss"].tail(20).mean()),
         **{k: sysrow[k] for k in ("f1", "f1_lo", "f1_hi", "recall_at",
                                   "attained_precision", "attained", "threshold",
@@ -873,7 +919,7 @@ def run_trn06_arm(arm: str, frame: pd.DataFrame) -> dict:
         "nickfs_link_rate": lr_of("nickname_fullsync"),
         "twin_auc": sl("twin_household", "auc_vs_true"),
         "twin_link_rate": lr_of("twin_household"),
-        "jrsr_auc": sl("suffix_jr_sr", "auc_vs_true"),  # empty-by-construction: NaN
+        "jrsr_auc": sl("suffix_jr_sr", "auc_vs_true"),  # LIVE via the role-admitting serializer
         "jrsr_link_rate": lr_of("suffix_jr_sr"),
         "dob_auc": sl("different_birth_year", "auc_vs_true"),
         "dob_link_rate": lr_of("different_birth_year"),
@@ -892,7 +938,8 @@ def run_trn06_arm(arm: str, frame: pd.DataFrame) -> dict:
           f"(P {row['attained_precision']:.4f}, R {row['recall_at']:.4f}) | "
           f"nickname link {row['nick_link_rate']:.2f} (fullsync "
           f"{row['nickfs_link_rate']:.2f}) | planted merge {row['hh_merge_rate']:.2f} | "
-          f"train {secs:.0f}s")
+          f"loss {row['first_train_loss']:.3f} -> {row['final_train_loss']:.3f} | "
+          f"init {ihash} | train {secs:.0f}s")
     return row
 
 
@@ -903,8 +950,15 @@ trn06_rows: list[dict] = [run_trn06_arm("off", train_slice)]
 # runner's per-cell timeout)
 trn06_rows.append(run_trn06_arm("lexicon_pairs", sup_slice))
 assert trn06_rows[0]["steps"] == trn06_rows[1]["steps"], "TRN-06 arms must share one budget"
+# 'identical init' is ASSERTED from the recorded param hashes, not assumed (NB08's rail)
+assert trn06_rows[0]["init_hash"] == trn06_rows[1]["init_hash"], (
+    f"TRN-06 arms must share one initialization, got "
+    f"{[(r['arm'], r['init_hash']) for r in trn06_rows]}"
+)
 print(f"\nbudget-matched: both arms ran exactly {trn06_rows[0]['steps']} optimizer steps "
       "(asserted from each returned history)")
+print(f"init check PASSED: both arms share param hash {trn06_rows[0]['init_hash']} — "
+      "identical init asserted, not assumed")
 tick("§3b TRN-06 arms", t_sec)
 
 # %%
@@ -957,13 +1011,16 @@ if PRETRAINED_READY:
     for arm, frame in (("off", train_slice), ("lexicon_pairs", sup_slice)):
         set_all_seeds(PRIMARY_SEED)
         enc_pre = build_encoder(cfg_pre)  # raises with the COMPAT placard if weights absent
-        enc_pre, hist_pre, secs_pre = train_arm(frame, seed=PRIMARY_SEED, encoder=enc_pre)
+        enc_pre, hist_pre, secs_pre, ihash_pre = train_arm(frame, seed=PRIMARY_SEED,
+                                                           encoder=enc_pre)
         sys_pre = system_metric(enc_pre, label=f"trn06-pre/{arm}")
         trn06_rows.append({
             "factor": "nickname_supervision", "arm": f"{arm}@pretrained",
             "scheme": SER_SCHEME, "missing": SER_MISSING, "eval_regime": "standard",
             "seed": PRIMARY_SEED, "steps": len(hist_pre), "batch": BATCH,
-            "train_secs": secs_pre, "reuse_of": None,
+            "train_secs": secs_pre, "reuse_of": None, "init_hash": ihash_pre,
+            "first_train_loss": float(hist_pre["loss"].iloc[0]),
+            "final_train_loss": float(hist_pre["loss"].tail(20).mean()),
             **{k: sys_pre[k] for k in ("f1", "f1_lo", "f1_hi", "recall_at",
                                        "attained_precision", "attained", "threshold",
                                        "n_candidate_pairs")},
@@ -1053,28 +1110,39 @@ factor_rows: list[dict] = []
 if WIN_SCHEME == SER_SCHEME and SER_MISSING == "token":
     tok_enc = arm_state["trn06/off"]["encoder"]
     tok_secs, tok_steps = float("nan"), trn06_rows[0]["steps"]
+    tok_hist = arm_state["trn06/off"]["history"]
+    tok_ihash = trn06_rows[0]["init_hash"]
     tok_reuse = "trn06/off (identical configuration: winning scheme == control cfg)"
     print(f"token cell reuses the control arm ({tok_reuse})")
 else:
     cfg_tok = copy.deepcopy(cfg)
     cfg_tok.serialize.scheme, cfg_tok.serialize.missing = WIN_SCHEME, "token"
-    tok_enc, tok_hist, tok_secs = train_arm(train_slice, seed=PRIMARY_SEED,
-                                            arm_cfg=cfg_tok)
+    tok_enc, tok_hist, tok_secs, tok_ihash = train_arm(train_slice, seed=PRIMARY_SEED,
+                                                       arm_cfg=cfg_tok)
     tok_steps, tok_reuse = len(tok_hist), None
 
 cfg_drop = copy.deepcopy(cfg)
 cfg_drop.serialize.scheme, cfg_drop.serialize.missing = WIN_SCHEME, "drop"
-drop_enc, drop_hist, drop_secs = train_arm(train_slice, seed=PRIMARY_SEED,
-                                           arm_cfg=cfg_drop)
+drop_enc, drop_hist, drop_secs, drop_ihash = train_arm(train_slice, seed=PRIMARY_SEED,
+                                                       arm_cfg=cfg_drop)
 assert len(drop_hist) == tok_steps == STEPS, "missing-field cells must share one budget"
-print(f"budget-matched: token and drop cells at exactly {STEPS} steps (asserted)")
+# identical init across the factor cells — asserted from param hashes (NB08's rail)
+assert tok_ihash == drop_ihash, (
+    f"missing-field cells must share one initialization, got token={tok_ihash} "
+    f"drop={drop_ihash}"
+)
+print(f"budget-matched: token and drop cells at exactly {STEPS} steps (asserted); "
+      f"init check PASSED (shared param hash {tok_ihash})")
 
 # %%
 factor_preds: dict[str, pd.Series] = {}
-for arm_name, enc_f, missing_f, secs_f, reuse_f in (
-    ("token", tok_enc, "token", tok_secs, tok_reuse),
-    ("drop", drop_enc, "drop", drop_secs, None),
+for arm_name, enc_f, missing_f, secs_f, reuse_f, hist_f, ihash_f in (
+    ("token", tok_enc, "token", tok_secs, tok_reuse, tok_hist, tok_ihash),
+    ("drop", drop_enc, "drop", drop_secs, None, drop_hist, drop_ihash),
 ):
+    print(f"  [{arm_name}] loss {hist_f['loss'].iloc[0]:.3f} -> "
+          f"{hist_f['loss'].tail(20).mean():.3f} | init {ihash_f}"
+          + (f" | {reuse_f}" if reuse_f else ""))
     for regime, frame_f in (("standard", ev_slice), ("dropout_boosted", boost_ev)):
         texts_f = texts_of(frame_f, scheme=WIN_SCHEME, missing=missing_f)
         sysrow = system_metric(enc_f, label=f"trn05/{arm_name}@{regime}",
@@ -1084,7 +1152,9 @@ for arm_name, enc_f, missing_f, secs_f, reuse_f in (
             "factor": "missing_field", "arm": arm_name,
             "scheme": WIN_SCHEME, "missing": missing_f, "eval_regime": regime,
             "seed": PRIMARY_SEED, "steps": STEPS, "batch": BATCH,
-            "train_secs": secs_f, "reuse_of": reuse_f,
+            "train_secs": secs_f, "reuse_of": reuse_f, "init_hash": ihash_f,
+            "first_train_loss": float(hist_f["loss"].iloc[0]),
+            "final_train_loss": float(hist_f["loss"].tail(20).mean()),
             **{k: sysrow[k] for k in ("f1", "f1_lo", "f1_hi", "recall_at",
                                       "attained_precision", "attained", "threshold",
                                       "n_candidate_pairs")},
@@ -1144,6 +1214,11 @@ else:
 # %%
 t_sec = time.time()
 trn06 = pd.DataFrame(trn06_rows + factor_rows)
+# before the meta claims identical init anywhere: every scratch-char row must carry the
+# ONE param hash the assertions above verified (pretrained rows, if any, hash separately)
+_scr_hashes = set(trn06.loc[~trn06["arm"].astype(str).str.contains("@"), "init_hash"])
+assert len(_scr_hashes) == 1, f"scratch arms must share one init hash, got {_scr_hashes}"
+INIT_HASH_SCRATCH = next(iter(_scr_hashes))
 registry.register(
     "trn06_nickname_matrix", trn06, cfg=cfg, tier=cfg.run.tier,
     meta={
@@ -1189,7 +1264,19 @@ registry.register(
         "split": {"scheme": SCHEME, "eval_records": len(ev_slice),
                   "eval_entities": int(ev_slice["entity_id"].nunique())},
         "met04_sd_replicate": SD_REPLICATE, "met04_detect_bar": DETECT_BAR,
+        "met04_detect_bar_residual_inclusive": DETECT_BAR_RESID,
         "met04_bar_source": BAR_SOURCE,
+        "init_identity": {"scratch_init_hash": INIT_HASH_SCRATCH,
+                          "note": "identical init across all scratch-char arms ASSERTED "
+                                  "from per-arm param hashes (init_hash column), NB08's "
+                                  "checkable-not-assumed rail"},
+        "serialized_roles": {"text_roles": TEXT_ROLES, "excluded": EXCLUDED_ROLES,
+                             "rationale": "NB08's measured exclusion of full_name "
+                                          "(truncation cost + stale-sync leakage), "
+                                          "inherited; train and eval share the set",
+                             "probe_serializer": "NB08 role-admitting form: probe dict "
+                                                 "order honored, injected name_suffix "
+                                                 "admitted (suffix_jr_sr live)"},
         "single_seed_caveat": "one seed per cell — DEMONSTRATION rows; the definitive "
                               "multi-seed matrices are tier=mid/node (placards in this "
                               "notebook)",
@@ -1201,7 +1288,8 @@ registry.register(
 print(f"registered trn06_nickname_matrix: {len(trn06)} rows")
 show_cols = ["factor", "arm", "eval_regime", "f1", "f1_lo", "f1_hi", "recall_at",
              "nickfs_link_rate", "nick_link_rate", "hh_merge_rate", "twin_auc",
-             "jrsr_auc", "dob_auc", "train_secs"]
+             "jrsr_auc", "dob_auc", "first_train_loss", "final_train_loss",
+             "train_secs"]
 display(trn06[show_cols].round(4))
 
 # %%
@@ -1376,11 +1464,15 @@ _ = verdict_box(
         f"{prop_deltas['planted_household']['delta']:+.3f} "
         f"[{prop_deltas['planted_household']['lo']:+.3f},"
         f"{prop_deltas['planted_household']['hi']:+.3f}]); AUC drops beyond 0.05: "
-        f"{p2_auc_damage if p2_auc_damage else 'none'}; slices empty by construction "
-        f"on this corpus (no name_suffix role): {empty_slices or 'none'}. "
+        f"{p2_auc_damage if p2_auc_damage else 'none'}; the suffix_jr_sr guard is LIVE "
+        f"via the NB08 role-admitting probe serializer (jrsr AUC {r_off['jrsr_auc']:.3f} "
+        f"-> {r_lex['jrsr_auc']:.3f}); probe slices with no live pairs: "
+        f"{empty_slices or 'none'}. "
         f"P3: paired B3F1 delta "
         f"{d_sys06['delta']:+.4f} [{d_sys06['ci_low']:+.4f},{d_sys06['ci_high']:+.4f}] "
-        f"vs MET-04 bar {DETECT_BAR:.4f} ({BAR_SOURCE.split(' run ')[0]}). "
+        f"vs MET-04 bars {DETECT_BAR:.4f} (pre-registered, scores the rule) / "
+        f"{DETECT_BAR_RESID:.4f} (residual-inclusive, primary honest lens) "
+        f"({BAR_SOURCE.split(' run ')[0]}). "
         f"By the pre-registered rule this scores {trn06_outcome}"
         + (" — a gain on one side with damage on the other would REFUTE, and did not "
            "occur at this seed" if trn06_outcome != "REFUTED" else
@@ -1423,7 +1515,8 @@ _ = verdict_box(
         f"[{d_std['ci_low']:+.4f},{d_std['ci_high']:+.4f}]. P2 interaction "
         f"(boosted - standard gap) = {d_boost['delta'] - d_std['delta']:+.4f} "
         f"({'token advantage widens under missingness' if p2_inter else 'no widening at this seed'}). "
-        f"MET-04 bar {DETECT_BAR:.4f} for single-seed margins. {ORDER_NOTE}. "
+        f"MET-04 bars for single-seed margins: {DETECT_BAR:.4f} (pre-registered) / "
+        f"{DETECT_BAR_RESID:.4f} (residual-inclusive, primary honest lens). {ORDER_NOTE}. "
         "SMOKE SCOPE: one seed, synthetic missingness stress (openly labeled — the "
         "corpus's measured dropout floor is ~1e-5 and bounds entry-error missingness "
         "only from below); the multi-seed 8-cell factorial x missingness ladder at mid "
@@ -1570,7 +1663,14 @@ studentB_slice = train_slice.copy()
 studentB_slice["entity_id"] = (
     "t_" + studentB_slice["record_id"].astype(str).map(teacher_labels).astype(str)
 )
-encB, histB, secsB = train_arm(studentB_slice, seed=PRIMARY_SEED)
+encB, histB, secsB, ihashB = train_arm(studentB_slice, seed=PRIMARY_SEED)
+# identical init across the provenance arms — asserted (student A reuses trn06/off)
+assert ihashB == trn06_rows[0]["init_hash"], (
+    f"students must share one initialization, got A={trn06_rows[0]['init_hash']} "
+    f"B={ihashB}"
+)
+print(f"student B loss {histB['loss'].iloc[0]:.3f} -> {histB['loss'].tail(20).mean():.3f} "
+      f"| init {ihashB} (matches student A's — asserted)")
 sysB = system_metric(encB, label="labelprov/studentB")
 sysA = {k: arm_state["trn06/off"]["row"][k]
         for k in ("f1", "f1_lo", "f1_hi", "recall_at", "attained_precision",
@@ -1728,6 +1828,43 @@ print(f"A-over-B AUC gap: teacher-wrong {gap_wrong:+.4f} vs teacher-right "
       f"{gap_right:+.4f}; concentration (wrong - right) = {CONC['point']:+.4f} "
       f"[{CONC['lo']:+.4f}, {CONC['hi']:+.4f}] (pair bootstrap, {N_BOOT} reps, "
       f"{_n_nan_reps} single-class NaN replicates dropped)")
+
+# %%
+# COMPOSITION CONTROL for the concentration instrument. The two strata are populated by
+# DIFFERENT pair kinds (the teacher-wrong stratum is dominated by out-of-block true
+# pairs; the teacher-right stratum by matchkey trues, random negatives and planted
+# pairs), so the pooled concentration number confounds stratum with pair-source
+# composition. Named, measured, and carried into the meta: the stratum x source x label
+# composition table, plus WITHIN-SOURCE stratified A-over-B AUC gaps — matchkey is the
+# only source carrying both classes in both strata (the others are single-class by
+# construction, AUC NaN carried as information) — so the node grid can pre-register a
+# composition-controlled version of this instrument.
+comp_tbl = (pd.DataFrame({
+    "stratum": np.where(t_correct, "teacher_right", "teacher_wrong"),
+    "source": e_cand["source"].to_numpy(),
+    "label": np.where(is_true, "true_pair", "false_pair"),
+}).groupby(["stratum", "source", "label"]).size().rename("n_pairs").reset_index())
+display(comp_tbl)
+
+within_source_gaps: dict[str, dict] = {}
+for src in sorted(e_cand["source"].unique()):
+    m_src = (e_cand["source"] == src).to_numpy()
+    gw_src = stratum_auc(cosA, m_src & ~t_correct) - stratum_auc(cosB, m_src & ~t_correct)
+    gr_src = stratum_auc(cosA, m_src & t_correct) - stratum_auc(cosB, m_src & t_correct)
+    within_source_gaps[str(src)] = {
+        "gap_wrong": float(gw_src), "gap_right": float(gr_src),
+        "concentration": float(gw_src - gr_src),
+        "n_wrong": int((m_src & ~t_correct).sum()),
+        "n_right": int((m_src & t_correct).sum()),
+    }
+    print(f"  within-source [{src:>17}] A-over-B gap: wrong {gw_src:+.4f} / right "
+          f"{gr_src:+.4f} -> concentration {gw_src - gr_src:+.4f} "
+          f"(n wrong/right {within_source_gaps[str(src)]['n_wrong']:,}/"
+          f"{within_source_gaps[str(src)]['n_right']:,})")
+MK_CONC = within_source_gaps.get("matchkey", {}).get("concentration", float("nan"))
+print(f"matchkey-only concentration (both strata in-block, composition-matched by "
+      f"source): {MK_CONC:+.4f} vs pooled {CONC['point']:+.4f} — where the two disagree, "
+      "pair-source composition is doing work the pooled number cannot see")
 tick("§6c strata", t_sec)
 
 # %%
@@ -1737,11 +1874,17 @@ audit_rows = [
      ("f1", "f1_lo", "f1_hi", "recall_at", "attained_precision", "attained",
       "threshold")},
      "steps": trn06_rows[0]["steps"], "train_secs": float("nan"),
+     "init_hash": trn06_rows[0]["init_hash"],
+     "first_train_loss": trn06_rows[0]["first_train_loss"],
+     "final_train_loss": trn06_rows[0]["final_train_loss"],
      "reuse_of": "trn06/off (identical configuration, stated)"},
     {"kind": "system", "student": "B_teacher", **{k: sysB[k] for k in
      ("f1", "f1_lo", "f1_hi", "recall_at", "attained_precision", "attained",
       "threshold")},
-     "steps": len(histB), "train_secs": secsB, "reuse_of": None},
+     "steps": len(histB), "train_secs": secsB, "init_hash": ihashB,
+     "first_train_loss": float(histB["loss"].iloc[0]),
+     "final_train_loss": float(histB["loss"].tail(20).mean()),
+     "reuse_of": None},
     {"kind": "teacher", "student": None,
      "teacher_kind": TEACHER_KIND, "threshold": TEACH_THR,
      "attained": bool(t_res["attained"]),
@@ -1788,10 +1931,25 @@ registry.register(
                                "bootstrap": f"pair unit, percentile, {N_BOOT} reps "
                                             "(diagnostic instrument; system claims "
                                             "use entity-unit BCa)"},
+        "composition_confound": {
+            "named": "the strata are populated by DIFFERENT pair kinds (teacher-wrong "
+                     "is dominated by out-of-block true pairs), so the pooled "
+                     "concentration number confounds stratum with pair-source "
+                     "composition; the node grid should pre-register a "
+                     "composition-controlled instrument",
+            "strata_composition": comp_tbl.to_dict("records"),
+            "within_source_auc_gaps": within_source_gaps,
+            "matchkey_only_concentration": float(MK_CONC),
+        },
+        "init_identity": {"shared_init_hash": ihashB,
+                          "note": "students A and B share one param hash, asserted "
+                                  "(A reuses trn06/off; NB08's rail)"},
         "paired_system_delta_A_minus_B": {
             "delta": float(d_ab["delta"]), "ci_low": float(d_ab["ci_low"]),
             "ci_high": float(d_ab["ci_high"]), "sign_stable": bool(d_ab["sign_stable"])},
-        "met04_detect_bar": DETECT_BAR, "met04_bar_source": BAR_SOURCE,
+        "met04_detect_bar": DETECT_BAR,
+        "met04_detect_bar_residual_inclusive": DETECT_BAR_RESID,
+        "met04_bar_source": BAR_SOURCE,
         "single_seed_caveat": "one seed, one teacher realization — a DEMONSTRATION; "
                               "the multi-seed + real-NCID-teacher versions are the "
                               "definitive test (node placard)",
@@ -1891,11 +2049,20 @@ _ = verdict_box(
         f"{t_pw['precision']:.3f} / recall {t_pw['recall']:.3f} vs truth "
         f"(FN-dominated, the lit_review §8 signature). P1: A-minus-B paired B3F1 delta "
         f"{d_ab['delta']:+.4f} [{d_ab['ci_low']:+.4f},{d_ab['ci_high']:+.4f}], "
-        f"sign_stable={d_ab['sign_stable']}, vs MET-04 bar {DETECT_BAR:.4f} — "
+        f"sign_stable={d_ab['sign_stable']}, vs MET-04 bars {DETECT_BAR:.4f} "
+        f"(pre-registered) / {DETECT_BAR_RESID:.4f} (residual-inclusive, primary "
+        f"honest lens) — "
         f"{'the truth-labeled student wins beyond noise' if p1_ab else 'not separable from replicate noise at one seed'}. "
         f"P2 concentration: A-over-B AUC gap {gap_wrong:+.4f} on teacher-wrong pairs "
         f"vs {gap_right:+.4f} on teacher-right; difference {CONC['point']:+.4f} "
-        f"[{CONC['lo']:+.4f},{CONC['hi']:+.4f}] ({conc_txt}). "
+        f"[{CONC['lo']:+.4f},{CONC['hi']:+.4f}] ({conc_txt}). COMPOSITION CAVEAT, "
+        f"named before the node run: the two strata carry different pair-source mixes "
+        f"(the wrong stratum is dominated by out-of-block true pairs), so the pooled "
+        f"sign can be driven by which pair kinds populate each stratum rather than by "
+        f"teacher-error concentration per se — the within-source matchkey-only "
+        f"concentration is {MK_CONC:+.4f}, and the stratum x source x label "
+        f"composition table is in the artifact meta so the node grid can pre-register "
+        f"a composition-controlled instrument. "
         f"By the pre-registered rule: {lp_outcome}. SMOKE SCOPE: one seed, one "
         "teacher realization, a JW-mean FS stand-in rather than the Splink teacher "
         "or the real NCID key — the definitive multi-seed and NCID-teacher versions "

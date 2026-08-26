@@ -55,10 +55,10 @@ from IPython.display import display
 from er_lab.blocking import ann
 from er_lab.cluster.schemes import transitive_closure
 from er_lab.config import REPO_ROOT, config_hash, load_config_from_env, set_all_seeds
-from er_lab.data.schema import NON_TEXT_ROLES, ROLES
+from er_lab.data.schema import ROLES
 from er_lab.eval.bootstrap import bootstrap_ci
 from er_lab.eval.operating_points import find_threshold_for_precision
-from er_lab.eval.power import power_table, variance_components
+from er_lab.eval.power import detect_bar, power_table, variance_components
 from er_lab.infra.artifacts import ArtifactRegistry
 from er_lab.infra.device import describe_platform
 from er_lab.models.encoders import build_encoder
@@ -256,8 +256,13 @@ print(f"eval  slice: {prof_ev['n_records']:,} records / {prof_ev['n_entities']:,
       f"(mean cluster {prof_ev['mean_cluster_size']:.1f}) — fixed across ALL arms (paired)")
 
 # %%
-# Serialization: per cfg.serialize, through the same role rule the training loop uses.
-TEXT_ROLES = [c for c in corpus.columns if c in ROLES and c not in NON_TEXT_ROLES]
+# Serialization: notebook 08's explicit TEXT_ROLES, inherited — full_name is EXCLUDED per
+# NB08's measured decision (it doubles serialized bytes into certain truncation at
+# max_len=128, and the nickname/typo/swap channels leave it STALE, leaking the clean name
+# back through a side channel). Frames handed to the training loop are trimmed to the same
+# role set below, so train and eval serialize the identical fields.
+TEXT_ROLES = ["given_name", "family_name", "dob", "city", "zip", "sex"]
+EXCLUDED_ROLES = [c for c in corpus.columns if c in ROLES and c not in TEXT_ROLES]
 SER_SCHEME, SER_MISSING = str(cfg.serialize.scheme), str(cfg.serialize.missing)
 
 
@@ -274,6 +279,8 @@ EVAL_POS = {rid: i for i, rid in enumerate(ev_slice["record_id"].astype(str))}
 lens = np.array([len(t.encode("utf-8")) for t in EVAL_TEXTS])
 share_trunc = float((lens > cfg.model.max_len - 1).mean())
 print(f"serialization: scheme={SER_SCHEME} missing={SER_MISSING}, roles={TEXT_ROLES}")
+print(f"  role columns excluded from serialization (NB08's measured decision, see above): "
+      f"{EXCLUDED_ROLES}")
 print(f"eval text length: median {int(np.median(lens))} bytes; {share_trunc:.0%} exceed the "
       f"encoder's max_len={cfg.model.max_len} byte window and are TRUNCATED — at smoke the "
       "tail roles (zip/sex, sometimes city) are often invisible to the encoder. A real "
@@ -289,6 +296,11 @@ def fresh_encoder(seed: int):
 
 def train_arm(corpus_df, *, loss, miner, seed, eval_every=0, filter_proxy=None, encoder=None):
     """One budget-matched training run; asserts the step budget from the history."""
+    # the loop derives its serialization roles from the frame's columns, so drop role
+    # columns outside TEXT_ROLES (i.e. full_name) — train and eval see the SAME field set
+    corpus_df = corpus_df.drop(
+        columns=[c for c in corpus_df.columns if c in ROLES and c not in TEXT_ROLES]
+    )
     enc = fresh_encoder(seed) if encoder is None else encoder
     t0 = time.time()
     enc, hist = train_encoder(
@@ -651,12 +663,14 @@ for nd, frame in pilot_draws.items():
             "recall_at": sysrow["recall_at"],
             "attained_precision": sysrow["attained_precision"],
             "attained": sysrow["attained"], "threshold": sysrow["threshold"],
+            "first_train_loss": float(hist_p["loss"].iloc[0]),
             "final_train_loss": float(hist_p["loss"].tail(20).mean()),
             "train_secs": secs, "eval_secs": sysrow["eval_secs"], "steps": len(hist_p),
         })
         print(f"  seed {seed} x draw {nd}: B3F1={sysrow['f1']:.4f} "
               f"(P attained {sysrow['attained_precision']:.4f}, "
-              f"R {sysrow['recall_at']:.4f}) train {secs:.0f}s")
+              f"R {sysrow['recall_at']:.4f}) | loss {hist_p['loss'].iloc[0]:.3f} -> "
+              f"{hist_p['loss'].tail(20).mean():.3f} | train {secs:.0f}s")
 pilot_df = pd.DataFrame(pilot_rows)
 assert pilot_df["steps"].nunique() == 1, "pilot runs must share one step budget"
 print(f"\npilot grid: {len(pilot_df)} runs x {STEPS} steps each (budget asserted); "
@@ -680,13 +694,23 @@ tick("§3b pilot runs", t_sec)
 t_sec = time.time()
 comps = variance_components(pilot_df[["seed", "noise_draw", "value"]])
 SD_REPLICATE = float(np.sqrt(comps["seed"] + comps["noise_draw"]))
-DETECT_BAR = 2.0 * np.sqrt(2.0) * SD_REPLICATE  # single-seed paired-delta ~95% bar
+SD_RUN = float(np.sqrt(comps["seed"] + comps["noise_draw"] + comps["residual"]))
+# TWO single-seed paired-delta bars, both registered (er_lab.eval.power.detect_bar):
+# the card's pre-registered formula excludes the residual; the residual-inclusive bar is
+# the honest per-run lens, because residual run-level noise does NOT cancel between two
+# independently trained arms — each arm's single run carries its own residual draw.
+DETECT_BAR = detect_bar(comps, include_residual=False)  # the MET-04 card's formula
+DETECT_BAR_RESID = detect_bar(comps, include_residual=True)  # primary noise lens
 print("variance components (B3F1 at the 0.99-precision op point):")
 for k, v in comps.items():
     print(f"  {k:>12}: {v:.3e}  (sd {np.sqrt(v):.4f})")
-print(f"sd_replicate = sqrt(seed + noise_draw) = {SD_REPLICATE:.4f}")
-print(f"single-seed detectability bar 2*sqrt(2)*sd = {DETECT_BAR:.4f} "
-      "(a 1-replicate-per-arm delta smaller than this is indistinguishable from noise)")
+print(f"sd_replicate = sqrt(seed + noise_draw) = {SD_REPLICATE:.4f} (the card's formula); "
+      f"residual-inclusive per-run sd = {SD_RUN:.4f}")
+print(f"single-seed detectability bars: pre-registered 2*sqrt(2)*sd_replicate = "
+      f"{DETECT_BAR:.4f}; residual-inclusive 2*sqrt(2*(seed+noise+residual)) = "
+      f"{DETECT_BAR_RESID:.4f} — the residual does not cancel between independently "
+      "trained arms, so the inclusive bar is the stricter honest lens; verdicts are "
+      "SCORED by each card's pre-registered rule and READ through both")
 
 TARGET_DELTAS = (0.01, 0.02, 0.05)
 pt = power_table(TARGET_DELTAS, comps, n_levels=(3, 5, 10))
@@ -712,6 +736,16 @@ registry.register(
         "value_is": f"bcubed F1 at the precision-{PREC_TARGET} operating point "
                     "(highest-attainable fallback, flagged per run in met04_pilot_runs)",
         "sd_replicate": SD_REPLICATE, "detect_bar_single_seed": DETECT_BAR,
+        "sd_run_residual_inclusive": SD_RUN,
+        "detect_bar_residual_inclusive": DETECT_BAR_RESID,
+        "bars": "BOTH single-seed paired-delta bars registered "
+                "(er_lab.eval.power.detect_bar): detect_bar_single_seed = "
+                "2*sqrt(2)*sqrt(seed+noise) is the MET-04 card's pre-registered "
+                "formula and scores the smoke verdicts; detect_bar_residual_inclusive "
+                "= 2*sqrt(2*(seed+noise+residual)) is the primary honest lens — "
+                "residual run-level noise does not cancel between independently "
+                "trained arms. The mid-tier MET-04 rerun should pre-register the "
+                "residual-inclusive formula via the section-10 changelog.",
         "power_model": "er_lab.eval.power normal approximation (docstrings state it)",
         "corpus_provenance": CORPUS_PROVENANCE,
         "binding": "PLAN §3: this table is the matrix-pruning arbiter — arms are "
@@ -813,6 +847,15 @@ _ = verdict_box(
         f"{'yes' if sn[0.01] > 5 else 'NO'}; roughly <=5 at 0.05: "
         f"{'yes' if sn[0.05] <= 8 else 'NO'}). Pilot F1 spread across identical "
         f"configurations: {pilot_df['value'].max() - pilot_df['value'].min():.4f}. "
+        f"BAR HONESTY: the card's sd_replicate formula EXCLUDES the residual "
+        f"({comps['residual']:.2e}, "
+        f"{'the largest' if comps['residual'] >= max(comps['seed'], comps['noise_draw']) else 'a comparable'} "
+        f"measured component), which does not cancel between independently trained arms "
+        f"— the residual-inclusive per-run sd is {SD_RUN:.4f} and its paired-delta bar "
+        f"{DETECT_BAR_RESID:.4f} is registered alongside the pre-registered bar "
+        f"{DETECT_BAR:.4f} in met04_power_table meta; downstream verdicts quote both, "
+        f"and the mid-tier rerun should pre-register the residual-inclusive formula via "
+        f"the section-10 changelog. "
         f"SMOKE SCOPE: single tiny configuration, train-time factors only, "
         f"{prof_ev['n_entities']} eval entities; the mid-tier grid (placard above) adds "
         "split and eval-sampling components and is the definitive table."
@@ -828,9 +871,12 @@ _ = verdict_box(
 # TRN-01 > TRN-05/06) — never quietly under-replicated. Concretely, notebook 10 loads
 # `met04_power_table` before its TRN-03/04 runs, the node factorials size their
 # seed lists from `seeds_needed`, and *this* notebook's own TRN-01/TRN-02 verdicts below
-# use the single-seed detectability bar printed above. The smoke table's scope limits are
-# flagged in the artifact meta; its mid-tier successor inherits the same name and simply
-# shadows it in the registry at that tier.
+# use the single-seed detectability bars printed above — the cards' pre-registered
+# `2*sqrt(2)*sd_replicate` bar scores each verdict, and the residual-inclusive bar
+# (registered alongside it in the artifact meta) is quoted as the primary honest noise
+# lens, since residual run-level noise does not cancel between independently trained
+# arms. The smoke table's scope limits are flagged in the artifact meta; its mid-tier
+# successor inherits the same name and simply shadows it in the registry at that tier.
 #
 # ## 4. TRN-01 — which loss family, at matched budget?
 #
@@ -866,6 +912,7 @@ def run_loss_arm(loss: str, *, regime: str, encoder=None) -> dict:
     row = {
         "loss": loss, "regime": regime, "seed": PRIMARY_SEED, "steps": len(hist_a),
         "batch": BATCH, "train_secs": secs,
+        "first_train_loss": float(hist_a["loss"].iloc[0]),
         "final_train_loss": float(hist_a["loss"].tail(20).mean()),
         **{k: sysrow[k] for k in ("f1", "f1_lo", "f1_hi", "recall_at",
                                   "attained_precision", "attained", "threshold")},
@@ -881,7 +928,8 @@ def run_loss_arm(loss: str, *, regime: str, encoder=None) -> dict:
     print(f"  [{regime}/{loss}] B3F1={row['f1']:.4f} [{row['f1_lo']:.4f},{row['f1_hi']:.4f}] "
           f"(P {row['attained_precision']:.4f}, R {row['recall_at']:.4f}) | "
           f"align={row['align']:.3f} uniform={row['uniform']:.2f} "
-          f"rankme={row['rankme']:.1f} | train {secs:.0f}s")
+          f"rankme={row['rankme']:.1f} | loss {row['first_train_loss']:.3f} -> "
+          f"{row['final_train_loss']:.3f} (this loss family's own scale) | train {secs:.0f}s")
     return row
 
 
@@ -946,6 +994,11 @@ registry.register(
         "split": {"scheme": SCHEME, "eval_records": prof_ev["n_records"],
                   "eval_entities": prof_ev["n_entities"]},
         "met04_sd_replicate": SD_REPLICATE, "met04_detect_bar": DETECT_BAR,
+        "met04_detect_bar_residual_inclusive": DETECT_BAR_RESID,
+        "serialized_roles": {"text_roles": TEXT_ROLES, "excluded": EXCLUDED_ROLES,
+                             "rationale": "NB08's measured exclusion of full_name "
+                                          "(truncation cost + stale-sync leakage), "
+                                          "inherited; train and eval share the set"},
         "single_seed_caveat": "one seed per cell — a DEMONSTRATION row set; the "
                               "definitive multi-seed matrix is the node factorial "
                               "(placard in this notebook)",
@@ -957,16 +1010,34 @@ registry.register(
 print(f"registered trn01_loss_matrix: {len(trn01)} rows")
 show_cols = ["loss", "regime", "f1", "f1_lo", "f1_hi", "recall_at", "attained_precision",
              "align", "uniform", "rankme", "hub_skew", "typo05_cos", "typo20_cos",
-             "dob_auc", "twin_auc", "final_train_loss", "train_secs"]
+             "dob_auc", "twin_auc", "first_train_loss", "final_train_loss", "train_secs"]
 display(trn01[show_cols].round(4))
 
 # %% [markdown]
 # The battery columns deserve one reading note before the figures: `typo@…` are
 # should-hold cosines (higher = typo-invariant), `dob_auc`/`twin_auc` are must-not-hold
 # separations against true pairs (1.0 = confusables cleanly below genuine matches, 0.5 =
-# indistinguishable). With ~half the eval rows truncated at the smoke byte window, the
-# birth-year confusable often sits at the window's edge — a **measured** smoke limitation
-# printed in §1, not an encoder verdict.
+# indistinguishable). How much of each record the encoder actually *sees* at the smoke
+# byte window is measured, never hand-written — the cell below recomputes the §1
+# truncation share and where the dob field lands relative to the window.
+
+# %%
+# Truncation reality for the battery columns — computed, not narrated.
+_dob_prefix_roles = TEXT_ROLES[: TEXT_ROLES.index("dob") + 1]
+_dob_end = np.array([
+    len(t.encode("utf-8"))
+    for t in serialize_frame(ev_slice, text_roles=_dob_prefix_roles,
+                             scheme=SER_SCHEME, missing=SER_MISSING)
+])
+dob_visible_share = float((_dob_end <= cfg.model.max_len - 1).mean())
+print(f"measured in §1 and carried here verbatim: {share_trunc:.0%} of eval texts exceed "
+      f"the {cfg.model.max_len - 1}-byte window and are truncated "
+      f"(median serialized length {int(np.median(lens))}B).")
+print(f"the serialized text reaches the END of the dob field inside the window on "
+      f"{dob_visible_share:.0%} of eval rows (median byte offset through dob "
+      f"{int(np.median(_dob_end))}B vs window {cfg.model.max_len - 1}B) — the truncation "
+      "loss falls on the roles serialized after it. A measured smoke constraint on the "
+      "battery columns above, not an encoder verdict.")
 
 # %%
 scratch = trn01[trn01["regime"] == "scratch_char"].reset_index(drop=True)
@@ -1046,16 +1117,20 @@ margin = float(f1s.iloc[0] - f1s.iloc[1])
 spread = float(f1s.iloc[0] - f1s.iloc[-1])
 aligns = scratch.set_index("loss")["align"]
 supcon_best_align = str(aligns.idxmin()) == "supcon"
-sig = margin > DETECT_BAR
+sig = margin > DETECT_BAR  # the card's pre-registered rule scores against THIS bar
+sig_resid = margin > DETECT_BAR_RESID  # the residual-inclusive honest lens
+print(f"single-seed ranking: {' > '.join(f1s.index)} (F1 {', '.join(f'{v:.4f}' for v in f1s)})")
+print(f"winning margin {winner}-over-{runner} = {margin:.4f}; full spread = {spread:.4f}")
+print(f"pre-registered MET-04 bar {DETECT_BAR:.4f} -> margin "
+      f"{'clears it' if sig else 'is INSIDE it'}; residual-inclusive bar "
+      f"{DETECT_BAR_RESID:.4f} -> margin "
+      f"{'clears it too' if sig_resid else 'is INSIDE it (noise-vulnerable under the stricter lens)'}")
 if sig and winner == "supcon" and supcon_best_align:
     trn01_outcome = "CONFIRMED"
 elif sig and winner != "supcon":
     trn01_outcome = "REFUTED"
 else:
     trn01_outcome = "UNEXPLAINED"
-print(f"single-seed ranking: {' > '.join(f1s.index)} (F1 {', '.join(f'{v:.4f}' for v in f1s)})")
-print(f"winning margin {winner}-over-{runner} = {margin:.4f}; full spread = {spread:.4f}; "
-      f"MET-04 bar = {DETECT_BAR:.4f} -> margin {'EXCEEDS' if sig else 'is INSIDE'} the bar")
 print(f"alignment best (lowest): {aligns.idxmin()} ({aligns.min():.4f}); "
       f"supcon lowest as predicted: {supcon_best_align}")
 pre_flag = ("present" if (trn01["regime"] == "pretrained").any()
@@ -1068,10 +1143,18 @@ _ = verdict_box(
         f"trn01_loss_matrix (tier {TIER}, scratch-char regime, 1 seed, "
         f"{int(scratch['steps'].iloc[0])} matched steps). Point ranking "
         f"{' > '.join(f1s.index)}; winning margin {margin:.4f} vs the pre-registered "
-        f"MET-04 bar {DETECT_BAR:.4f} (2*sqrt(2)*sd_replicate, sd={SD_REPLICATE:.4f}) — "
-        + ("the margin clears the bar, so the smoke slice supports scoring the "
-           "prediction. " if sig else
-           "the margin sits INSIDE the bar: by the card's own decision rule this "
+        f"MET-04 bar {DETECT_BAR:.4f} (2*sqrt(2)*sd_replicate, sd={SD_REPLICATE:.4f}) "
+        f"and the residual-inclusive bar {DETECT_BAR_RESID:.4f} (the primary honest "
+        f"lens: residual run-level noise does not cancel between independently trained "
+        f"arms) — "
+        + (("the margin clears BOTH bars, so the smoke slice supports scoring the "
+            "prediction. " if sig_resid else
+            "the margin clears the pre-registered bar it is scored against, but sits "
+            "INSIDE the residual-inclusive bar — scored per the card's rule, this "
+            "single-seed margin must be read as noise-vulnerable, not established. ")
+           if sig else
+           "the margin sits INSIDE the pre-registered bar (and the wider "
+           "residual-inclusive one): by the card's own decision rule this "
            "single-seed ranking is noise-bound, and that is the lesson MET-04 exists to "
            "teach — the smoke slice demonstrates the machinery, not a winner. ")
         + f"Alignment lowest for {aligns.idxmin()} (supcon-predicted: "
@@ -1150,8 +1233,16 @@ def contamination_stats(hist: pd.DataFrame) -> dict:
 
 def run_miner_arm(arm: str, *, miner: str, frame: pd.DataFrame, dup_variant: str,
                   filter_proxy: pd.Series | None = None,
-                  reuse: dict | None = None) -> dict:
-    """Train + instrument one TRN-02 arm (or adopt a reused, identical-config run)."""
+                  reuse: dict | None = None,
+                  contamination_override: float | None = None) -> dict:
+    """Train + instrument one TRN-02 arm (or adopt a reused, identical-config run).
+
+    ``contamination_override`` (the in-batch arm's simulated collision rate) fills
+    ALL THREE contamination columns (first/final/max) with the one simulated value
+    BEFORE anything prints, so the cell output and the registered row agree;
+    ``n_minings_measured`` stays 0 for such a row — simulated, never measured
+    in-loop. One policy, stated in the matrix meta.
+    """
     if reuse is not None:
         enc_m, hist_m, secs = reuse["encoder"], reuse["history"], float("nan")
     else:
@@ -1167,28 +1258,34 @@ def run_miner_arm(arm: str, *, miner: str, frame: pd.DataFrame, dup_variant: str
         "mean_cluster_size": prof["mean_cluster_size"],
         "n_records_train": prof["n_records"], "n_entities_train": prof["n_entities"],
         "steps": int(hist_m["step"].iloc[-1]), "train_secs": secs,
+        "first_train_loss": float(hist_m["loss"].iloc[0]),
         "final_train_loss": float(hist_m["loss"].tail(20).mean()),
         **contamination_stats(hist_m),
         **{k: sysrow[k] for k in ("f1", "f1_lo", "f1_hi", "recall_at",
                                   "attained_precision", "attained", "threshold")},
     }
+    if contamination_override is not None:
+        for col in ("contamination_first", "contamination_final", "contamination_max"):
+            row[col] = float(contamination_override)
     arm_state[f"trn02/{arm}"] = {"encoder": enc_m, "history": hist_m}
     print(f"  [{arm}] contamination first->final: {row['contamination_first']:.3f} -> "
-          f"{row['contamination_final']:.3f} | B3F1={row['f1']:.4f} "
-          f"[{row['f1_lo']:.4f},{row['f1_hi']:.4f}] (P {row['attained_precision']:.4f})"
+          f"{row['contamination_final']:.3f}"
+          + (" (simulated, all three columns; see meta)"
+             if contamination_override is not None else "")
+          + f" | B3F1={row['f1']:.4f} "
+          f"[{row['f1_lo']:.4f},{row['f1_hi']:.4f}] (P {row['attained_precision']:.4f}) | "
+          f"loss {row['first_train_loss']:.3f} -> {row['final_train_loss']:.3f}"
           + ("" if reuse is None else " | reused TRN-01 infonce/inbatch run"))
     return row
 
 
 t_sec = time.time()
 miner_rows: list[dict] = []
-inb_row = run_miner_arm(
+miner_rows.append(run_miner_arm(
     "inbatch", miner="inbatch", frame=train_slice, dup_variant="natural",
     reuse=arm_state["scratch_char/infonce"],
-)
-inb_row["contamination_final"] = INBATCH_CONTAM  # the simulated in-batch rate (see §5a)
-inb_row["contamination_first"] = INBATCH_CONTAM
-miner_rows.append(inb_row)
+    contamination_override=INBATCH_CONTAM,  # the simulated in-batch rate (see §5a)
+))
 
 # %%
 # (one training arm per cell — same per-cell-timeout reasoning as TRN-01)
@@ -1390,14 +1487,23 @@ registry.register(
                   f"{REMINE_EVERY} steps re-measures contamination",
         "contamination_columns": "contamination_first/final/max are fn_contamination of "
                                  "the RAW mined table from the training history "
-                                 "(pre-mitigation, PLAN's measured trap); inbatch row "
-                                 "carries the simulated in-batch collision rate; "
-                                 "post_filter_contamination / filter_keep_rate are "
-                                 "final-encoder mining passed through each arm's filter",
+                                 "(pre-mitigation, PLAN's measured trap). ONE POLICY "
+                                 "for the inbatch row: the loop measures nothing for "
+                                 "the in-batch miner, so ALL THREE columns carry the "
+                                 "simulated in-batch collision rate (section 5a) and "
+                                 "n_minings_measured stays 0 — simulated, never "
+                                 "measured in-loop. post_filter_contamination / "
+                                 "filter_keep_rate are final-encoder mining passed "
+                                 "through each arm's filter",
         "protocol": {"operating_point": f"precision@{PREC_TARGET} (loud fallback)",
                      "ci": {"unit": "entity", "method": "bca", "n_boot": N_BOOT},
                      "candidates": f"ann.candidates(k={CAND_K}, index='flat')"},
         "met04_sd_replicate": SD_REPLICATE, "met04_detect_bar": DETECT_BAR,
+        "met04_detect_bar_residual_inclusive": DETECT_BAR_RESID,
+        "serialized_roles": {"text_roles": TEXT_ROLES, "excluded": EXCLUDED_ROLES,
+                             "rationale": "NB08's measured exclusion of full_name "
+                                          "(truncation cost + stale-sync leakage), "
+                                          "inherited; train and eval share the set"},
         "single_seed_caveat": "one seed per cell — demonstration rows; the definitive "
                               "12-cell multi-seed grid is tier=node (placard below)",
         "inbatch_reuse": "inbatch row reuses TRN-01's infonce/inbatch run (identical "
@@ -1408,7 +1514,8 @@ registry.register(
 print(f"registered trn02_miner_matrix: {len(trn02)} rows")
 display(trn02[["arm", "dup_variant", "mean_cluster_size", "contamination_final",
                "post_filter_contamination", "filter_keep_rate", "f1", "f1_lo", "f1_hi",
-               "recall_at", "attained_precision", "train_secs"]].round(4))
+               "recall_at", "attained_precision", "first_train_loss", "final_train_loss",
+               "train_secs"]].round(4))
 
 
 # %%
@@ -1506,10 +1613,13 @@ p2_oracle_best_mined = f1_orc >= max(f1_bm, f1_ann, f1_sdx)
 gap = f1_inb - f1_ann
 recovery = (f1_orc - f1_ann) / gap if gap > 0 else float("nan")
 p3_sig = (f1_orc - f1_ann) > DETECT_BAR
+# the card's P3 wording: 'the oracle filter recovers at least half of the
+# in-batch-minus-ANN gap WHERE THAT GAP EXISTS' — vacuously satisfied when gap <= 0
+p3_recovery_ok = (gap <= 0) or (recovery >= 0.5)
 contradiction = (mined_beats_inb > DETECT_BAR) or ((f1_ann - f1_orc) > DETECT_BAR)
 if not p1_monotone or contradiction:
     trn02_outcome = "REFUTED"
-elif p1_monotone and p3_sig and p2_oracle_best_mined:
+elif p1_monotone and p3_sig and p2_oracle_best_mined and p3_recovery_ok:
     trn02_outcome = "CONFIRMED"
 else:
     trn02_outcome = "UNEXPLAINED"
@@ -1518,9 +1628,11 @@ print(f"P1 dial (frozen-encoder ANN contamination, by mean cluster size): "
 print(f"P2: mined-vs-inbatch best delta {mined_beats_inb:+.4f} (bar {DETECT_BAR:.4f}) -> "
       f"no free win: {p2_no_free_win}; oracle best mined arm: {p2_oracle_best_mined}")
 rec_txt = f"{recovery:.2f}" if gap > 0 else "n/a (no gap)"
-print(f"P3: inbatch-minus-ann gap {gap:+.4f}; oracle recovery {rec_txt} of the gap; "
+print(f"P3: inbatch-minus-ann gap {gap:+.4f}; oracle recovery {rec_txt} of the gap "
+      f"(card clause 'gap absent or recovery >= 0.5': {p3_recovery_ok}); "
       f"oracle-minus-ann {f1_orc - f1_ann:+.4f} "
-      f"{'EXCEEDS' if p3_sig else 'inside'} the bar")
+      f"{'EXCEEDS' if p3_sig else 'inside'} the pre-registered bar "
+      f"({DETECT_BAR:.4f}); residual-inclusive bar {DETECT_BAR_RESID:.4f}")
 print(f"proxy demo: soundex F1 {f1_sdx:.4f} vs oracle {f1_orc:.4f} "
       f"(gap {f1_orc - f1_sdx:+.4f}); post-filter contamination oracle "
       f"{byarm.loc['ann_filtered_oracle', 'post_filter_contamination']:.3f} vs proxy "
@@ -1542,9 +1654,13 @@ _ = verdict_box(
         f"delta {mined_beats_inb:+.4f} vs bar {DETECT_BAR:.4f} (no significant free win: "
         f"{p2_no_free_win}); oracle filter best mined arm: {p2_oracle_best_mined}. "
         f"P3: oracle-minus-ANN {f1_orc - f1_ann:+.4f} "
-        f"{'clears' if p3_sig else 'sits inside'} the MET-04 bar"
-        + (f" (recovery {recovery:.2f} of the in-batch gap)" if gap > 0 else
-           " (no in-batch-minus-ANN gap to recover at this seed)")
+        f"{'clears' if p3_sig else 'sits inside'} the pre-registered MET-04 bar "
+        f"{DETECT_BAR:.4f} (residual-inclusive bar {DETECT_BAR_RESID:.4f}, the primary "
+        f"honest lens, quoted alongside)"
+        + (f"; recovery {recovery:.2f} of the in-batch gap vs the card's >= 0.5 clause "
+           f"({'met' if p3_recovery_ok else 'NOT met'})" if gap > 0 else
+           " (no in-batch-minus-ANN gap to recover at this seed — the card's recovery "
+           "clause is vacuous)")
         + f". Proxy demo: soundex keeps {byarm.loc['ann_filtered_soundex', 'filter_keep_rate']:.0%} "
         f"of mined pairs (oracle {byarm.loc['ann_filtered_oracle', 'filter_keep_rate']:.0%}) "
         f"and cuts post-filter contamination to "
@@ -1565,9 +1681,12 @@ _ = verdict_box(
 #   contract; every mid/node matrix sizes replicates from `seeds_needed` or invokes the
 #   pre-registered §10.1 fractionalization rule. The smoke-scope flag travels in the
 #   artifact meta, and the mid-tier rerun shadows this table at its own tier.
-# - **The single-seed detectability bar is the reading lens for every smoke matrix.** Both
-#   verdicts above applied it; notebooks 10–11 should quote the same bar rather than
-#   invent their own. A smoke row is a demonstration; the bar is what keeps it honest.
+# - **The single-seed detectability bars are the reading lens for every smoke matrix.**
+#   Both verdicts above applied them; notebooks 10–11 should quote the same two bars
+#   rather than invent their own — the cards' pre-registered `2*sqrt(2)*sd_replicate`
+#   bar scores each verdict, and the residual-inclusive bar (registered alongside it)
+#   is the primary honest noise lens. A smoke row is a demonstration; the bars are what
+#   keep it honest.
 # - **`trn01_loss_matrix` seeds the loss factor.** Notebook 12 consumes it by contract
 #   (blocking experiments need a trained encoder's embeddings); the node factorial fills
 #   the pretrained regime and the replicate axis.

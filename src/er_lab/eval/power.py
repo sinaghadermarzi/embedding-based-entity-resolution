@@ -17,7 +17,85 @@ import numpy as np
 import pandas as pd
 from scipy.special import ndtr, ndtri
 
-__all__ = ["power_table", "seeds_needed", "variance_components"]
+__all__ = ["detect_bar", "power_table", "seeds_needed", "variance_components"]
+
+
+def _seed_noise_vars(
+    var_components: dict[str, float], seed_key: str, noise_key: str
+) -> tuple[float, float]:
+    """Extract (var_seed, var_noise) with the shared key-handling contract.
+
+    ONE missing key counts as 0 (a pilot without that factor), but when BOTH
+    keys are absent while other non-residual components exist, raise: that
+    pattern is a factor-naming mismatch, and silently treating both as 0 would
+    plan/gate with sigma = 0. NaN or negative components are rejected.
+    """
+    if seed_key not in var_components and noise_key not in var_components:
+        others = sorted(k for k in var_components if k != "residual")
+        if others:
+            raise ValueError(
+                f"var_components has neither {seed_key!r} nor {noise_key!r} but does "
+                f"contain {others} — this looks like a factor-naming mismatch, and "
+                "treating both as 0 would plan with sigma = 0 (seeds_needed = 2, "
+                "power 1.0 at every delta); pass seed_key/noise_key naming your "
+                "pilot's factor columns"
+            )
+    var_seed = var_components.get(seed_key, 0.0)
+    var_noise = var_components.get(noise_key, 0.0)
+    for name, v in ((seed_key, var_seed), (noise_key, var_noise)):
+        if not np.isfinite(v) or v < 0:
+            raise ValueError(f"var_components[{name!r}] must be finite and >= 0, got {v}")
+    return float(var_seed), float(var_noise)
+
+
+def detect_bar(
+    var_components: dict[str, float],
+    *,
+    include_residual: bool = True,
+    seed_key: str = "seed",
+    noise_key: str = "noise_draw",
+    residual_key: str = "residual",
+) -> float:
+    """Single-seed paired-delta detectability bar: ``2 * sqrt(2 * sigma2)``.
+
+    Model (normal approximation, documented): two arms each measured ONCE give
+    a paired delta with variance ``2 * sigma2`` where ``sigma2`` is the
+    per-run replicate variance; the bar is ~2 sd of that delta, so a
+    one-replicate-per-arm margin smaller than the bar is indistinguishable
+    from replicate noise.
+
+    ``include_residual=True`` (the default, and the honest per-run bar) uses
+    ``sigma2 = var[seed] + var[noise] + var[residual]``: residual run-level
+    noise does NOT cancel between two independently trained arms — each arm's
+    single run carries its own residual draw — so a per-run paired-delta bar
+    that omits it understates noise (the MET-04 smoke pilot measured the
+    residual as its largest component). ``include_residual=False`` reproduces
+    the MET-04 card's pre-registered formula ``2*sqrt(2)*sd_replicate`` with
+    ``sd_replicate = sqrt(var_seed + var_noise)``, kept so verdicts can be
+    scored against the pre-registered rule while quoting the
+    residual-inclusive bar alongside it.
+
+    Key handling matches :func:`power_table` (one missing seed/noise key = 0;
+    both absent with other components present raises as a naming mismatch).
+    With ``include_residual=True`` a missing/NaN/negative ``residual_key``
+    raises rather than silently degrading to the exclusive bar.
+    """
+    var_seed, var_noise = _seed_noise_vars(var_components, seed_key, noise_key)
+    sigma2 = var_seed + var_noise
+    if include_residual:
+        if residual_key not in var_components:
+            raise ValueError(
+                f"include_residual=True but var_components has no {residual_key!r} "
+                "component — pass the full variance_components() dict, or "
+                "include_residual=False for the seed+noise-only (pre-registered) bar"
+            )
+        var_resid = float(var_components[residual_key])
+        if not np.isfinite(var_resid) or var_resid < 0:
+            raise ValueError(
+                f"var_components[{residual_key!r}] must be finite and >= 0, got {var_resid}"
+            )
+        sigma2 += var_resid
+    return float(2.0 * np.sqrt(2.0 * sigma2))
 
 
 def variance_components(
@@ -176,21 +254,7 @@ def power_table(
     detectable delta needs more seeds than the budget affords is fractionated
     or cut by the pre-registered rule, never quietly under-replicated.
     """
-    if seed_key not in var_components and noise_key not in var_components:
-        others = sorted(k for k in var_components if k != "residual")
-        if others:
-            raise ValueError(
-                f"var_components has neither {seed_key!r} nor {noise_key!r} but does "
-                f"contain {others} — this looks like a factor-naming mismatch, and "
-                "treating both as 0 would plan with sigma = 0 (seeds_needed = 2, "
-                "power 1.0 at every delta); pass seed_key/noise_key naming your "
-                "pilot's factor columns"
-            )
-    var_seed = var_components.get(seed_key, 0.0)
-    var_noise = var_components.get(noise_key, 0.0)
-    for name, v in ((seed_key, var_seed), (noise_key, var_noise)):
-        if not np.isfinite(v) or v < 0:
-            raise ValueError(f"var_components[{name!r}] must be finite and >= 0, got {v}")
+    var_seed, var_noise = _seed_noise_vars(var_components, seed_key, noise_key)
     sigma = float(np.sqrt(var_seed + var_noise))
     z_a = float(ndtri(1 - alpha / 2)) if two_sided else float(ndtri(1 - alpha))
 

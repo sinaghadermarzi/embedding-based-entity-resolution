@@ -48,6 +48,7 @@
 
 # %%
 import copy
+import hashlib
 import time
 
 import numpy as np
@@ -59,7 +60,7 @@ from sklearn.metrics import roc_auc_score
 from er_lab.blocking import ann
 from er_lab.cluster.schemes import transitive_closure
 from er_lab.config import REPO_ROOT, config_hash, load_config_from_env, set_all_seeds
-from er_lab.data.schema import NON_TEXT_ROLES, ROLES
+from er_lab.data.schema import ROLES
 from er_lab.eval.bootstrap import bootstrap_ci
 from er_lab.eval.operating_points import find_threshold_for_precision
 from er_lab.infra.artifacts import ArtifactRegistry
@@ -192,11 +193,18 @@ print(f"  {len(corpus):,} records / {corpus['entity_id'].nunique():,} entities")
 
 SD_REPLICATE = float(met04_meta["extra"]["sd_replicate"])
 DETECT_BAR = float(met04_meta["extra"]["detect_bar_single_seed"])
+# BOTH registered bars travel: the cards' pre-registered 2*sqrt(2)*sd_replicate bar
+# scores each verdict; the residual-inclusive bar is the primary honest noise lens
+# (residual run-level noise does not cancel between independently trained arms).
+DETECT_BAR_RESID = float(
+    met04_meta["extra"].get("detect_bar_residual_inclusive", DETECT_BAR)
+)
 _power = met04[met04["kind"] == "power"]
 SEEDS_NEEDED = {float(r["delta"]): int(r["seeds_needed"]) for _, r in _power.iterrows()}
 print(f"\nMET-04 lens (met04_power_table run {met04_meta['created_at']}): "
-      f"sd_replicate={SD_REPLICATE:.4f}, single-seed bar 2*sqrt(2)*sd={DETECT_BAR:.4f}; "
-      f"seeds needed at delta 0.01/0.02/0.05 = "
+      f"sd_replicate={SD_REPLICATE:.4f}, single-seed bars: pre-registered "
+      f"2*sqrt(2)*sd={DETECT_BAR:.4f}, residual-inclusive {DETECT_BAR_RESID:.4f} "
+      f"(primary honest lens); seeds needed at delta 0.01/0.02/0.05 = "
       f"{SEEDS_NEEDED[0.01]}/{SEEDS_NEEDED[0.02]}/{SEEDS_NEEDED[0.05]}")
 print(f"  scope flag carried verbatim: {met04_meta['extra']['scope']}")
 
@@ -246,7 +254,12 @@ tick("§1 arena + MET-04 lens", t_sec)
 
 # %%
 t_sec = time.time()
-TEXT_ROLES = [c for c in corpus.columns if c in ROLES and c not in NON_TEXT_ROLES]
+# Notebook 08's explicit TEXT_ROLES, inherited — full_name EXCLUDED per NB08's measured
+# decision (it doubles serialized bytes into certain truncation at max_len=128, and the
+# noise channels leave it STALE, leaking the clean name back through a side channel).
+# Frames handed to the training loop are trimmed to the same set (train == eval fields).
+TEXT_ROLES = ["given_name", "family_name", "dob", "city", "zip", "sex"]
+EXCLUDED_ROLES = [c for c in corpus.columns if c in ROLES and c not in TEXT_ROLES]
 SER_SCHEME, SER_MISSING = str(cfg.serialize.scheme), str(cfg.serialize.missing)
 
 
@@ -263,9 +276,17 @@ EVAL_POS = {rid: i for i, rid in enumerate(ev_slice["record_id"].astype(str))}
 lens = np.array([len(t.encode("utf-8")) for t in EVAL_TEXTS])
 share_trunc = float((lens > cfg.model.max_len - 1).mean())
 print(f"serialization: scheme={SER_SCHEME} missing={SER_MISSING}, roles={TEXT_ROLES}")
+print(f"  role columns excluded from serialization (NB08's measured decision, see above): "
+      f"{EXCLUDED_ROLES}")
 print(f"eval text length: median {int(np.median(lens))} bytes; {share_trunc:.0%} exceed the "
       f"encoder's max_len={cfg.model.max_len} byte window and are TRUNCATED — the same "
       "measured smoke constraint notebook 09 carried; the mid window (192) covers the row.")
+
+# the loop derives its serialization roles from the frame's columns, so the training
+# frame drops role columns outside TEXT_ROLES (full_name): train == eval field set
+TRAIN_FRAME = train_slice.drop(
+    columns=[c for c in train_slice.columns if c in ROLES and c not in TEXT_ROLES]
+)
 
 
 def fresh_encoder(seed: int):
@@ -274,27 +295,38 @@ def fresh_encoder(seed: int):
     return build_encoder(cfg)
 
 
+def param_hash(module) -> str:
+    """12-hex digest of all parameters in state_dict order — init-identity checks (NB08)."""
+    h = hashlib.sha256()
+    for tensor in module.state_dict().values():
+        h.update(tensor.detach().cpu().numpy().tobytes())
+    return h.hexdigest()[:12]
+
+
 def train_arm(*, augment: str, seed: int, cfg_arm=None, encoder=None):
     """One budget-matched training run; asserts the step budget from the history.
 
     TRN-03's factor is ONLY the augmentation kind: loss/miner locked at the
     pre-registered defaults (infonce, in-batch), same train slice, same init seed.
+    Returns (encoder, history, secs, init_hash) — the pre-training param hash is
+    what makes the 'identical init' claim checkable, not asserted (NB08's rail).
     The np.errstate guard silences gecko's benign 0-candidate divide warning
     (same workaround as notebooks 05/09) during augmented batches.
     """
     arm_cfg = cfg if cfg_arm is None else cfg_arm
     enc = fresh_encoder(seed) if encoder is None else encoder
+    init_hash = param_hash(enc)
     t0 = time.time()
     with np.errstate(divide="ignore"):
         enc, hist = train_encoder(
-            enc, train_slice, arm_cfg, loss_name=LOSS_LOCKED, miner_name="inbatch",
+            enc, TRAIN_FRAME, arm_cfg, loss_name=LOSS_LOCKED, miner_name="inbatch",
             augment_kind=augment, steps=STEPS, seed=seed,
         )
     secs = time.time() - t0
     assert len(hist) == STEPS and int(hist["step"].iloc[-1]) == STEPS, (
         f"budget violation: expected exactly {STEPS} optimizer steps, history shows {len(hist)}"
     )
-    return enc, hist, secs
+    return enc, hist, secs, init_hash
 
 
 def system_metric(encoder, *, label: str, texts: list[str] | None = None,
@@ -650,8 +682,8 @@ def run_aug_arm(aug: str, *, regime: str = "scratch_char", cfg_arm=None, encoder
     """Train + fully instrument one TRN-03/TRN-04 arm; returns the matrix row."""
     if cfg_arm is None:
         cfg_arm = cfg_calibrated if aug == "calibrated" else cfg
-    enc_a, hist_a, secs = train_arm(augment=aug, seed=PRIMARY_SEED, cfg_arm=cfg_arm,
-                                    encoder=encoder)
+    enc_a, hist_a, secs, ihash = train_arm(augment=aug, seed=PRIMARY_SEED, cfg_arm=cfg_arm,
+                                           encoder=encoder)
     sysrow = system_metric(enc_a, label=f"trn03/{regime}/{aug}")
     rep, geo, geo_emb = property_panel(enc_a)
     dial = dial_curve(enc_a)
@@ -662,6 +694,8 @@ def run_aug_arm(aug: str, *, regime: str = "scratch_char", cfg_arm=None, encoder
     row = {
         "arm": aug, "regime": regime, "loss": LOSS_LOCKED, "miner": "inbatch",
         "seed": PRIMARY_SEED, "steps": len(hist_a), "batch": BATCH, "train_secs": secs,
+        "init_hash": ihash,
+        "first_train_loss": float(hist_a["loss"].iloc[0]),
         "final_train_loss": float(hist_a["loss"].tail(20).mean()),
         "n_params": int(sum(p.numel() for p in enc_a.parameters())),
         **{k: sysrow[k] for k in ("f1", "f1_lo", "f1_hi", "recall_at",
@@ -683,7 +717,9 @@ def run_aug_arm(aug: str, *, regime: str = "scratch_char", cfg_arm=None, encoder
     print(f"  [{regime}/{aug}] B3F1={row['f1']:.4f} [{row['f1_lo']:.4f},{row['f1_hi']:.4f}] "
           f"(P {row['attained_precision']:.4f}, R {row['recall_at']:.4f}) | "
           f"dialAUC@0.2={row['dial_auc@0.2']:.3f} typo20_cos={row['typo20_cos']:.3f} | "
-          f"align={row['align']:.3f} rankme={row['rankme']:.1f} | train {secs:.0f}s")
+          f"align={row['align']:.3f} rankme={row['rankme']:.1f} | "
+          f"loss {row['first_train_loss']:.3f} -> {row['final_train_loss']:.3f} | "
+          f"init {ihash} | train {secs:.0f}s")
     return row
 
 
@@ -708,8 +744,15 @@ trn03_rows.append(run_aug_arm("generic_typo"))
 trn03_rows.append(run_aug_arm("calibrated"))
 step_counts = {r["arm"]: r["steps"] for r in trn03_rows}
 assert len(set(step_counts.values())) == 1, f"budget mismatch across arms: {step_counts}"
+# the 'identical init' claim is ASSERTED from param hashes, not assumed (NB08's rail)
+init_hashes = {r["arm"]: r["init_hash"] for r in trn03_rows}
+assert len(set(init_hashes.values())) == 1, (
+    f"TRN-03 arms must share one initialization, got {init_hashes}"
+)
 print(f"\nbudget-matched: every arm ran exactly {trn03_rows[0]['steps']} optimizer steps "
       "(asserted from each returned history)")
+print(f"init check PASSED: 1 distinct param hash across {len(trn03_rows)} arms "
+      f"({trn03_rows[0]['init_hash']}) — identical init asserted, not assumed")
 tick("§3b TRN-03 arms", t_sec)
 
 # %%
@@ -721,7 +764,10 @@ registry.register(
         "design": "TRN-03 smoke slice: augmentation {none, generic_typo, calibrated} x "
                   "scratch_char regime x 1 seed, budget-matched at exactly "
                   f"{int(trn03['steps'].iloc[0])} optimizer steps (asserted); loss/miner "
-                  "locked at pre-registered defaults (infonce, in-batch); identical init",
+                  "locked at pre-registered defaults (infonce, in-batch); identical init "
+                  "ASSERTED from per-arm param hashes (init_hash column, one distinct "
+                  "value), NB08's checkable-not-assumed rail",
+        "init_hashes": sorted(set(trn03["init_hash"])),
         "augmentation": {
             "calibrated_rates": AUG_RATES,
             "calibrated_provenance": corpus_meta["extra"]["channel_rate_provenance"],
@@ -740,6 +786,11 @@ registry.register(
                     f"Mann-Whitney AUC at dial rates {list(DIAL_RATES)} "
                     f"({TRUE_PAIR_N} impostor pairs, probes <= {PROBE_N}/slice)",
         "met04_sd_replicate": SD_REPLICATE, "met04_detect_bar": DETECT_BAR,
+        "met04_detect_bar_residual_inclusive": DETECT_BAR_RESID,
+        "serialized_roles": {"text_roles": TEXT_ROLES, "excluded": EXCLUDED_ROLES,
+                             "rationale": "NB08's measured exclusion of full_name "
+                                          "(truncation cost + stale-sync leakage), "
+                                          "inherited; train and eval share the set"},
         "single_seed_caveat": "one seed per cell — DEMONSTRATION rows; the definitive "
                               "multi-seed 6-cell grid is tier=mid/node (placard in this "
                               "notebook)",
@@ -753,8 +804,8 @@ registry.register(
 print(f"registered trn03_augmentation_matrix: {len(trn03)} rows")
 show_cols = ["arm", "f1", "f1_lo", "f1_hi", "recall_at", "attained_precision",
              "dial_auc@0.02", "dial_auc@0.2", "typo20_cos", "nickname_cos", "dob_auc",
-             "twin_auc", "align", "uniform", "rankme", "hub_skew", "final_train_loss",
-             "train_secs"]
+             "twin_auc", "align", "uniform", "rankme", "hub_skew", "first_train_loss",
+             "final_train_loss", "train_secs"]
 display(trn03[show_cols].round(4))
 
 dial_long = pd.concat(
@@ -885,6 +936,7 @@ registry.register(
         "added_rates": {f"x{m:g}": {k: min(1.0, v * m) for k, v in AUG_RATES.items()}
                         for m in (*EVAL_NOISE_MULTS, STRESS_MULT)},
         "met04_detect_bar": DETECT_BAR,
+        "met04_detect_bar_residual_inclusive": DETECT_BAR_RESID,
         "single_seed_caveat": "1 seed per arm; CI bands are eval-resampling only",
     },
 )
@@ -938,7 +990,8 @@ p20 = {a: float(by03.loc[a, "dial_auc@0.2"]) for a in AUG_ARMS}
 order_sys = f1_cal > f1_gen > f1_none
 order_prop = p20["calibrated"] > p20["generic_typo"] > p20["none"]
 margin_cal_none = f1_cal - f1_none
-sig_gate = margin_cal_none > DETECT_BAR
+sig_gate = margin_cal_none > DETECT_BAR  # the card's pre-registered scoring bar
+sig_gate_resid = margin_cal_none > DETECT_BAR_RESID  # the residual-inclusive honest lens
 reversal = (f1_none - f1_cal) > DETECT_BAR
 if order_sys and order_prop and sig_gate:
     trn03_outcome = "CONFIRMED"
@@ -958,8 +1011,10 @@ cal_flattest_2x = min(drop2, key=drop2.get) == "calibrated"
 print(f"system ranking: {by03['f1'].sort_values(ascending=False).round(4).to_dict()}")
 print(f"property (dialAUC@0.2): { {a: round(v, 3) for a, v in p20.items()} }")
 print(f"predicted order calibrated>generic>none — system: {order_sys}, property: {order_prop}")
-print(f"calibrated-over-none margin {margin_cal_none:+.4f} vs MET-04 bar {DETECT_BAR:.4f} "
-      f"-> {'EXCEEDS' if sig_gate else 'INSIDE the bar (noise-bound)'}")
+print(f"calibrated-over-none margin {margin_cal_none:+.4f} vs pre-registered MET-04 bar "
+      f"{DETECT_BAR:.4f} -> {'clears it' if sig_gate else 'INSIDE the bar (noise-bound)'}; "
+      f"residual-inclusive bar {DETECT_BAR_RESID:.4f} -> "
+      f"{'clears it too' if sig_gate_resid else 'inside it'}")
 print(f"property-metric co-movement (Spearman over 3 arms): {co_move:+.2f} — SUGGESTIVE "
       "at most; 3 points, 1 seed")
 print(f"eval dial drop 0->2x: { {a: round(v, 4) for a, v in drop2.items()} } "
@@ -977,10 +1032,17 @@ _ = verdict_box(
         f"property (dialAUC@0.2 {p20['none']:.3f}/{p20['generic_typo']:.3f}/"
         f"{p20['calibrated']:.3f}): {order_prop}. Calibrated-over-none margin "
         f"{margin_cal_none:+.4f} vs the pre-registered MET-04 bar {DETECT_BAR:.4f} "
-        f"(sd_replicate {SD_REPLICATE:.4f}) — "
-        + ("the margin clears the bar, so the smoke slice supports scoring the "
-           "ordering. " if sig_gate else
-           "the margin sits INSIDE the bar: by the card's own decision rule the "
+        f"(sd_replicate {SD_REPLICATE:.4f}) and the residual-inclusive bar "
+        f"{DETECT_BAR_RESID:.4f} (primary honest lens — residual run-level noise does "
+        f"not cancel between independently trained arms) — "
+        + (("the margin clears BOTH bars, so the smoke slice supports scoring the "
+            "ordering. " if sig_gate_resid else
+            "the margin clears the pre-registered bar it is scored against but sits "
+            "INSIDE the residual-inclusive bar — scored per the card's rule, read as "
+            "noise-vulnerable. ")
+           if sig_gate else
+           "the margin sits INSIDE the pre-registered bar (and the wider "
+           "residual-inclusive one): by the card's own decision rule the "
            "system-metric ordering is noise-bound at one seed — the expected honest "
            "outcome the card itself predicted, given the calibrated dose is built from "
            "drift-visible LOWER-BOUND rates. ")
@@ -1021,6 +1083,7 @@ _ = verdict_box(
 t_sec = time.time()
 HEAD_COLS = ["regime", "arm", "f1", "f1_lo", "f1_hi", "recall_at", "attained_precision",
              "attained", "threshold", "steps", "batch", "train_secs", "n_params",
+             "init_hash", "first_train_loss", "final_train_loss",
              "align", "uniform", "rankme", "hub_skew", "typo05_cos", "typo20_cos",
              "nickname_cos", "dob_auc", "twin_auc"] + \
     [f"dial_auc@{r:g}" for r in DIAL_RATES] + [f"dial_cos@{r:g}" for r in DIAL_RATES]
@@ -1068,6 +1131,13 @@ tick("§5b pretrained gate", t_sec)
 t_sec = time.time()
 trn04 = pd.DataFrame(head_rows)
 assert trn04["steps"].nunique() == 1, "TRN-04 regimes must share one step budget"
+# within each regime the recipe arms must share one initialization — asserted from
+# the recorded param hashes (init identity is checkable, never assumed; NB08's rail)
+for _regime, _grp in trn04.groupby("regime"):
+    assert _grp["init_hash"].nunique() == 1, (
+        f"regime {_regime}: arms must share one init, got "
+        f"{dict(zip(_grp['arm'], _grp['init_hash']))}"
+    )
 trn04["winner"] = False
 for regime, grp in trn04.groupby("regime"):
     trn04.loc[grp["f1"].idxmax(), "winner"] = True
@@ -1098,6 +1168,14 @@ registry.register(
                      "ci": {"unit": "entity", "method": "bca", "n_boot": N_BOOT},
                      "candidates": f"ann.candidates(k={CAND_K}, index='flat')"},
         "met04_sd_replicate": SD_REPLICATE, "met04_detect_bar": DETECT_BAR,
+        "met04_detect_bar_residual_inclusive": DETECT_BAR_RESID,
+        "init_hashes_per_regime": {
+            regime: sorted(set(grp["init_hash"]))
+            for regime, grp in trn04.groupby("regime")
+        },
+        "serialized_roles": {"text_roles": TEXT_ROLES, "excluded": EXCLUDED_ROLES,
+                             "rationale": "NB08's measured exclusion of full_name, "
+                                          "inherited (see trn03 meta)"},
         "single_seed_caveat": "one seed per cell — demonstration rows; the definitive "
                               "matched-budget head-to-head is tier=mid/node",
         "corpus_provenance": CORPUS_PROVENANCE,
@@ -1180,7 +1258,8 @@ _ = verdict_box(
         f"{win04['dial_auc@0.2']:.3f} across the dial (decay {scratch_decay:.3f}), "
         f"{int(win04['n_params']):,} parameters, {int(win04['steps'])} steps. Budget "
         f"accounting: step-matched; parameter counts differ by regime and are printed, "
-        f"per the card. Read through the MET-04 lens (bar {DETECT_BAR:.4f}) whenever "
+        f"per the card. Read through the MET-04 lens (pre-registered bar {DETECT_BAR:.4f}; "
+        f"residual-inclusive bar {DETECT_BAR_RESID:.4f}, the primary honest lens) whenever "
         f"both regimes are present. This PARTIAL outcome is the honesty rail working — "
         f"the comparison completes on the mac, then multi-seed on the node."
     ),

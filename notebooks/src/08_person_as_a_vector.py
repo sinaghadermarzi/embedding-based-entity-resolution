@@ -748,6 +748,10 @@ else:
 # sign-stable in the predicted direction → CONFIRMED *as a single-seed demonstration*; any
 # sign-stable reversal → REFUTED at smoke; anything else → UNEXPLAINED (one seed cannot
 # settle it).
+#
+# *Audit note: this outcome mapping lived in this notebook's markdown, not inside the
+# immutable card (unlike notebooks 09–11, whose cards embed their decision rules) —
+# recorded here so the audit trail is exact; the registered card is untouched.*
 
 # %%
 d_colval_bare = paired_delta(
@@ -1099,6 +1103,10 @@ SECTION_SECS["7 geometry"] = time.time() - t_sec
 # Same discipline as TRN-05: predictions P1–P3 checked against `invariance_battery` and
 # `embedding_geometry_panel`, the P3 system-metric contrast as a shared-draw paired delta,
 # and the adoption-gate / mediation distinction stated rather than blurred.
+#
+# *Audit note: as with TRN-05 above, the CONFIRMED/REFUTED/UNEXPLAINED mapping for this
+# card lived in-notebook (fixed before looking) rather than inside the immutable card —
+# notebooks 09–11 moved the rule into the card payload; the registered card is untouched.*
 
 # %%
 b_ix = battery.set_index(["encoder", "slice"])
