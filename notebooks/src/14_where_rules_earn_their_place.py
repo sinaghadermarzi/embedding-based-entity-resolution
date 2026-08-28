@@ -57,6 +57,7 @@ import itertools
 import time
 
 import jellyfish
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from IPython.display import display
@@ -537,7 +538,8 @@ def pair_cosines(a_ids: pd.Series, b_ids: pd.Series) -> np.ndarray:
 def flags_to_float(df: pd.DataFrame) -> pd.DataFrame:
     """Boolean flag columns -> float before parquet (concat leaves bool+NaN object cols)."""
     out = df.copy()
-    for col in ("attained", "sign_stable", "exceeds_bar", "ci_excludes_zero"):
+    for col in ("attained", "sign_stable", "exceeds_bar", "ci_excludes_zero",
+                "fallback_involved"):
         if col in out.columns:
             out[col] = out[col].astype(float)
     return out
@@ -743,6 +745,31 @@ def apply_rules(prob: np.ndarray, fires: dict[str, np.ndarray], *, use_override:
     return s
 
 
+# The AUC representation, declared once: the isotonic map is only WEAKLY monotone
+# (piecewise-constant), and AUC is invariant only under STRICTLY monotone maps — pushing
+# cosines through it collapses distinct cosines onto shared steps, and that tie collapse
+# measurably shifts AUC. So every embedding-based AUC arm in this notebook (NSE-03, PRS-01)
+# scores the RAW cosine (rank-native, tie-free); the hybrid AUC arm applies the same
+# pre-registered grammar rank-natively on the cosine scale. Entity operating points keep
+# the calibrated probabilities — that is the system CLU-01 adjudicated, and the prob-scale
+# floor is part of its grammar.
+_floor_grid = np.linspace(-1.0, 1.0, 4001)
+_floor_probs = cal_iso_g.transform(_floor_grid)
+FLOOR_COS = (float(_floor_grid[np.argmax(_floor_probs >= P_FLOOR)])
+             if bool((_floor_probs >= P_FLOOR).any()) else 1.0)
+
+
+def apply_rules_ranknative(cos: np.ndarray, fires: dict[str, np.ndarray]) -> np.ndarray:
+    """The same grammar on the RAW cosine scale, for AUC arms only: the feature floors at
+    the prob-floor's cosine preimage (FLOOR_COS), the override sits strictly above the
+    cosine range, the guard strictly below it (precedence unchanged: the guard vetoes)."""
+    s = cos.copy()
+    s = np.where(fires["feature"], np.maximum(s, FLOOR_COS), s)
+    s = np.where(fires["override"], 2.0, s)
+    s = np.where(fires["guard"], -2.0, s)
+    return s
+
+
 # %%
 t_sec = time.time()
 ev_pos = ARENA_POS.loc[eval_full["record_id"].astype(str)].to_numpy()
@@ -772,9 +799,11 @@ print(f"union graph on the {SCHEME} eval half ({N_EV:,} records / {N_ENT_EV:,} e
       f"{float(bas01_meta['extra']['blocking']['metrics']['pair_completeness']):.4f}, "
       f"dense-only was {float(clu01_meta['extra']['candidate_graph']['pair_completeness']):.4f}"
       " — the union is the fairest arena either system gets at this budget)")
+N_ISO_STEPS = int(pd.Series(UP_PROB).nunique())
 print(f"edge precision at t=0: {UP_TRUE.mean():.4f}; calibrated prob range "
-      f"{UP_PROB.min():.3f}..{UP_PROB.max():.3f} ({pd.Series(UP_PROB).nunique()} distinct "
-      "isotonic steps)")
+      f"{UP_PROB.min():.3f}..{UP_PROB.max():.3f} ({N_ISO_STEPS} distinct isotonic steps "
+      f"over {len(upairs):,} pairs — the map is weakly monotone / many-to-one; prob-floor "
+      f"{P_FLOOR} cosine preimage {FLOOR_COS:.4f})")
 for rule in ("override", "guard", "feature"):
     f = FIRES[rule]
     if f.sum():
@@ -1101,6 +1130,7 @@ for regime, mix in REGIME_MIXES.items():
 
     _t0 = time.time()
     preds_r: dict[str, pd.Series] = {}
+    attained_r: dict[str, bool] = {}
     for system, sc in scores_r.items():
         sf = pd.DataFrame({"a": pr["a"], "b": pr["b"], "score": sc, "prob": sc})
         cache_r: dict[float, pd.Series] = {}
@@ -1114,6 +1144,7 @@ for regime, mix in REGIME_MIXES.items():
         res = find_threshold_for_precision(sf[["a", "b", "score"]], clus, truth_r,
                                            target=PREC_PRIMARY, grid=REG_GRID)
         preds_r[system] = clus(res["threshold"])
+        attained_r[system] = bool(res["attained"])
         ci = bootstrap_ci(preds_r[system], truth_r, "bcubed_f1", unit="entity",
                           n_boot=N_BOOT, seed=PRIMARY_SEED)
         regime_op_rows.append({
@@ -1130,7 +1161,9 @@ for regime, mix in REGIME_MIXES.items():
         cell_rows.append({
             "row": label, "col": regime, "value": d["delta"], "lo": d["ci_low"],
             "hi": d["ci_high"], "ci_excludes_zero": bool(d["sign_stable"]),
-            "exceeds_bar": bool(abs(d["delta"]) >= BAR_FULL), "basis": "MEASURED",
+            "exceeds_bar": bool(abs(d["delta"]) >= BAR_FULL),
+            "fallback_involved": bool(not attained_r[sys_a] or not attained_r[sys_b]),
+            "basis": "MEASURED",
         })
     secs["ops_and_deltas"] = time.time() - _t0
     REGIME_SECS[regime] = secs
@@ -1167,7 +1200,10 @@ registry.register(
             "regime_op": "system x re-corrupted regime at precision@0.99 (regime slice; "
                          "fallback flag = PLAN §5 rail)",
             "regime_delta": "the regime map cells: paired delta entity-F1 per "
-                            "(comparison row, regime col), ci_excludes_zero = hatching",
+                            "(comparison row, regime col), ci_excludes_zero = hatching; "
+                            "fallback_involved = 1.0 where either compared system sat at "
+                            "a PLAN §5 fallback operating point in that regime (the ○ "
+                            "marker on the heatmap)",
         },
         "grammar": {
             "override": "casefolded exact given+family+birth key -> prob 1 (birth key: "
@@ -1222,9 +1258,12 @@ registry.register(
     meta={
         "card": "HYB-01",
         "note": "auxiliary long-form view of hyb01_rule_value_map's regime_delta rows — "
-                "exactly the (row, col, value, ci_excludes_zero) contract "
-                "reporting.figures.regime_heatmap renders; value = paired delta entity-"
-                f"B3F1 at precision@{PREC_PRIMARY} (shared entity resamples)",
+                "the (row, col, value, ci_excludes_zero) contract "
+                "reporting.figures.regime_heatmap renders, plus a fallback_involved "
+                "column (1.0 = either compared system sat at a PLAN §5 fallback "
+                "operating point in that regime — rendered as the ○ marker so the "
+                "unmatched operating point is visible ON the figure); value = paired "
+                f"delta entity-B3F1 at precision@{PREC_PRIMARY} (shared entity resamples)",
         "fallback_cells": _fallback_cells.to_dict("records"),
         "single_seed_caveat": "single seed, one regeneration per regime — a DEMONSTRATION",
     },
@@ -1267,11 +1306,51 @@ fig = figures.plot_artifact(
 )
 
 # %%
-fig = figures.regime_heatmap(
-    registry, tier=cfg.run.tier, artifact="hyb01_regime_map",
+# The heatmap itself must show where a comparison involves a fallback operating point —
+# a skimmer reads THIS figure, not the meta — so it renders via plot_artifact with the
+# regime_heatmap contract (diverging scale, /// = CI excludes zero) plus a ○ marker on
+# every cell whose comparison involves a PLAN §5 fallback (precision unattainable).
+_fb_ops = regime_ops[~regime_ops["attained"].astype(bool)]
+_fb_note = ("" if _fb_ops.empty else
+            "○ = comparison involves a fallback operating point ("
+            + "; ".join(f"{s} at max-attainable {g['precision'].min():.3f}"
+                        + ("" if len(g) == 1 or g["precision"].min() == g["precision"].max()
+                           else f"–{g['precision'].max():.3f}")
+                        for s, g in _fb_ops.groupby("system")) + ")")
+
+
+def draw_regime_map(ax, df, meta):
+    matrix = (df.pivot(index="row", columns="col", values="value")
+              .sort_index(axis=0).sort_index(axis=1))
+    vals = matrix.to_numpy(dtype=float)
+    vmax = float(np.nanmax(np.abs(vals))) if np.isfinite(vals).any() else 1.0
+    im = ax.imshow(vals, cmap="RdBu_r", vmin=-vmax, vmax=vmax, aspect="auto")
+    ax.set_xticks(range(matrix.shape[1]), [str(c) for c in matrix.columns],
+                  rotation=45, ha="right")
+    ax.set_yticks(range(matrix.shape[0]), [str(r) for r in matrix.index])
+    ax.set_xlabel("regime")
+    ax.set_ylabel("comparison")
+    ax.figure.colorbar(im, ax=ax, label=f"paired Δ B³F1 at precision@{PREC_PRIMARY}")
+    sig = df.pivot(index="row", columns="col", values="ci_excludes_zero").reindex(
+        index=matrix.index, columns=matrix.columns)
+    fb = df.pivot(index="row", columns="col", values="fallback_involved").reindex(
+        index=matrix.index, columns=matrix.columns)
+    for i in range(matrix.shape[0]):
+        for j in range(matrix.shape[1]):
+            if pd.notna(sig.iloc[i, j]) and float(sig.iloc[i, j]) > 0:
+                ax.add_patch(plt.Rectangle((j - 0.5, i - 0.5), 1, 1, fill=False,
+                                           hatch="///", edgecolor="0.2", linewidth=0))
+            if pd.notna(fb.iloc[i, j]) and float(fb.iloc[i, j]) > 0:
+                ax.plot(j + 0.36, i - 0.33, marker="o", markersize=5.5, color="0.1",
+                        markerfacecolor="white", markeredgewidth=1.1)
+
+
+fig = figures.plot_artifact(
+    registry, tier=cfg.run.tier, artifact="hyb01_regime_map", draw=draw_regime_map,
     title=f"The noise-regime map: paired ΔB³F1 at precision@{PREC_PRIMARY} "
-          "(hatched = 95% CI excludes zero)",
-    figsize=(7.6, 4.6),
+          "(hatched = 95% CI excludes zero)"
+          + (f"\n{_fb_note}" if _fb_note else ""),
+    figsize=(7.6, 4.9),
 )
 
 # %% [markdown]
@@ -1338,9 +1417,14 @@ _ = verdict_box(
 # generic generator). Regime 3 is **real**: NC same-NCID aligned pairs across two snapshots
 # as positives, sampled cross-NCID within-county pairs as negatives. **The NC regime is
 # pair-level only** — aligned pairs carry no entity structure, so no entity metric exists
-# there; the shared currency across all three regimes is pair-level AUC. NC values are
-# casefolded before scoring (one documented normalization, identical for every system — the
-# corpus the encoder trained on is lowercase); every display is masked.
+# there; the shared currency across all three regimes is pair-level AUC. One declared
+# representation for every AUC arm (§6): the **raw cosine** for the embedding and the
+# grammar applied rank-natively for the hybrid — the isotonic map is only weakly monotone
+# (piecewise-constant, measured step count in §6), so pushing scores through it collapses
+# ties and measurably shifts AUC; the map still matters wherever probabilities are needed,
+# and the entity_op rows keep using it. NC values are casefolded before scoring (one
+# documented normalization, identical for every system — the corpus the encoder trained on
+# is lowercase); every display is masked.
 
 
 # %%
@@ -1563,25 +1647,35 @@ nc_texts = serialize_frame(pd.concat([nc_a, nc_b], ignore_index=True),
 nc_emb = encoder.encode(nc_texts, batch_size=ENC_BATCH)
 NC_ENC_SECS = time.time() - _t0
 nc_cos = np.einsum("ij,ij->i", nc_emb[: len(nc_a)], nc_emb[len(nc_a):]).astype(float)
+nc_fires = rule_fires(nc_a, nc_b)  # dob absent -> birth key = snapshot_year - age (±1)
 nc_scores = {
     "fs_standin": jw_standin(nc_a, nc_b),  # dob absent -> given/family/city fuzzy + zip
-    "embedding": cal_iso_g.transform(nc_cos),
+    "embedding": nc_cos,  # RAW cosine — the declared AUC representation (§6)
+    "hybrid_all": apply_rules_ranknative(nc_cos, nc_fires),
 }
-nc_fires = rule_fires(nc_a, nc_b)  # dob absent -> birth key = snapshot_year - age (±1)
-nc_scores["hybrid_all"] = apply_rules(nc_scores["embedding"], nc_fires, use_override=True,
-                                      use_guard=True, use_feature=True)
 print(f"encoded {len(nc_texts):,} NC pair sides in {NC_ENC_SECS:.0f}s; dob is [MISSING] in "
-      "every serialization (NC has no full DOB); the calibrated map transfers UNVALIDATED "
-      "to this distribution — AUC (rank-only) is the honest metric here, and it is "
-      "invariant to that monotone map")
+      "every serialization (NC has no full DOB). Measured tie-collapse caveat: the "
+      f"isotonic map is only WEAKLY monotone ({N_ISO_STEPS} distinct steps on the union "
+      "graph) and AUC is invariant only under STRICTLY monotone maps — pushing cosines "
+      "through it collapses ties and measurably shifts AUC, so every embedding-based AUC "
+      "arm here scores the RAW cosine (rank-native, tie-free); the map would in any case "
+      "transfer UNVALIDATED to this distribution wherever probabilities were needed")
 for rule in ("override", "guard", "feature"):
     print(f"  NC rule '{rule}': fires on {int(nc_fires[rule].sum()):,} pairs "
           f"({nc_fires[rule].mean():.2%}); true-share "
           f"{float(nc_label[nc_fires[rule]].mean()) if nc_fires[rule].sum() else np.nan:.4f}")
 
+# Every AUC arm on the declared rank-native representation (§6): raw cosine for the
+# embedding, the grammar applied rank-natively for the hybrid, the JW score for FS.
+# (The prob-scale SYSTEMS/gen_scores vectors keep driving the entity operating points —
+# that is the system the protocol clusters; only the AUC table changes representation.)
 REGIME_AUC_INPUTS = {
-    "calibrated": ({k: SYSTEMS[k] for k in HEAT_SYSTEMS}, UP_TRUE, "pair (union graph)"),
-    "generic-uniform": (gen_scores, gen_true, "pair (union graph)"),
+    "calibrated": ({"fs_standin": UP_JW, "embedding": UP_COS,
+                    "hybrid_all": apply_rules_ranknative(UP_COS, FIRES)},
+                   UP_TRUE, "pair (union graph)"),
+    "generic-uniform": ({"fs_standin": gen_scores["fs_standin"], "embedding": cos_g,
+                         "hybrid_all": apply_rules_ranknative(cos_g, fires_g)},
+                        gen_true, "pair (union graph)"),
     "nc-drift": (nc_scores, nc_label, "pair (aligned +/- sampled negatives)"),
 }
 auc_rows: list[dict] = []
@@ -1605,7 +1699,8 @@ for regime, (score_dict, labels, universe) in REGIME_AUC_INPUTS.items():
                                "level": "pair", "basis": "MEASURED"})
 auc_df = pd.DataFrame(auc_rows)
 print(f"\npair-level AUC by regime ({N_BOOT_AUC} shared pair-resamples, cap {AUC_CAP:,}; "
-      "pair unit — entity clustering ignored in the two synthetic regimes, stated):")
+      "pair unit — entity clustering ignored in the two synthetic regimes, stated; every "
+      "embedding-based arm scored on the RAW cosine, rank-native — see the §6 note):")
 display(auc_df[["regime", "system", "auc", "auc_lo", "auc_hi", "rank", "n_pairs",
                 "pos_rate"]].round(4))
 for regime, order in RANKINGS.items():
@@ -1664,6 +1759,17 @@ registry.register(
         "auc_protocol": {"n_boot": N_BOOT_AUC, "cap": AUC_CAP, "unit": "pair",
                          "limitation": "pair resamples ignore entity clustering in the "
                                        "synthetic regimes (stated in the card)"},
+        "auc_representation": "every embedding-based AUC arm scores the RAW cosine "
+                              "(embedding) or the grammar applied rank-natively on the "
+                              "raw cosine (hybrid_all: override above the cosine range, "
+                              "guard below it, feature floored at the prob-floor's "
+                              f"cosine preimage {FLOOR_COS:.4f}); the isotonic map is "
+                              f"only WEAKLY monotone ({N_ISO_STEPS} distinct steps over "
+                              f"the {len(upairs)} union pairs) and AUC is invariant only "
+                              "under strictly monotone maps — the tie collapse "
+                              "measurably shifts AUC, so one tie-free representation is "
+                              "declared for every arm; entity_op rows keep the "
+                              "calibrated-probability systems the protocol clusters",
         "single_seed_caveat": "one encoder, one seed, one draw per regime — a "
                               "DEMONSTRATION; NSE-03's definitive home is tier=mid",
         "nc_provenance": f"corpus_registry aligned pairs "
@@ -1747,12 +1853,15 @@ _ = verdict_box(
         f"entity fixed-precision operating point the synthetic-regime ranking is "
         f"{_ent_cal} (calibrated) / {_ent_gen} (generic) — MET-01's pair-vs-entity "
         "reversal, live in the entity_op rows; the invariance scored here is pair-level "
-        "by necessity, not by preference. Stated limitations: pair-resample "
-        "CIs ignore entity clustering in the two synthetic regimes; the calibrated map "
-        "transfers to NC unvalidated (AUC is rank-only, so the monotone map cannot change "
-        "it); the FS stand-in proxies the tuned FS (spearman "
-        f"{_rho:.3f} vs bas01). SINGLE-SEED DEMONSTRATION: one encoder, one draw per "
-        "regime — the definitive NSE-03 is tier=mid (PLAN §3)."
+        "by necessity, not by preference. Representation, declared: every embedding-based "
+        "AUC arm scores the RAW cosine (rank-native, tie-free) — the isotonic map is only "
+        f"WEAKLY monotone ({N_ISO_STEPS} distinct steps on the union graph), AUC is "
+        "invariant only under STRICTLY monotone maps, and the tie collapse measurably "
+        "shifts AUC; the map would in any case transfer to NC unvalidated wherever "
+        "probabilities were needed. Stated limitations: pair-resample CIs ignore entity "
+        "clustering in the two synthetic regimes; the FS stand-in proxies the tuned FS "
+        f"(spearman {_rho:.3f} vs bas01). SINGLE-SEED DEMONSTRATION: one encoder, one "
+        "draw per regime — the definitive NSE-03 is tier=mid (PLAN §3)."
     ),
     registry=registry,
 )
@@ -1765,7 +1874,9 @@ tick("§9d NSE-03 register + verdict", t_sec)
 # system {FS stand-in, embedding}. `raw_unparse` (the package's pre-standardization channel)
 # is applied to the eval half at rate 1.0: name parts compose into `'FAMILY, GIVEN M'` and
 # blank out; dob/city/zip/sex survive, so the raw penalty lands exactly on the name signal.
-# Same pairs in all four cells; pair-level AUC; the question is whether the ranking flips.
+# Same pairs in all four cells; pair-level AUC — and **both embedding cells score the raw
+# cosine** (the §6 declared representation), so the parsed→raw drop measures the parsing
+# change alone, never a transform change.
 
 # %%
 t_sec = time.time()
@@ -1798,10 +1909,10 @@ print(f"encoded the raw eval half in {time.time() - _t0:.0f}s")
 
 prs_scores = {
     ("parsed", "fs_standin"): UP_JW,
-    ("parsed", "embedding"): UP_PROB,
+    ("parsed", "embedding"): UP_COS,  # RAW cosine — the §6 declared AUC representation
     ("raw", "fs_standin"): jw_standin(ar_raw, br_raw, fuzzy=("full_name", "city"),
                                       exact=("dob", "zip")),
-    ("raw", "embedding"): raw_cos,  # AUC is rank-only; the calibrated map is moot here
+    ("raw", "embedding"): raw_cos,  # RAW cosine — same representation as the parsed arm
 }
 _flat = {f"{arm}|{system}": v for (arm, system), v in prs_scores.items()}
 prs_pts, prs_dds, prs_boots = auc_table(_flat, np.asarray(UP_TRUE, bool), cap=AUC_CAP,
@@ -1827,6 +1938,39 @@ print(f"\nparsed->raw AUC drop: fs_standin {_fs_drop['delta']:+.4f} "
 print(f"difference-in-differences (fs drop - emb drop): {_dd_point:+.4f}, shared-draw 95% "
       f"interval [{_dnd_boot_lo:+.4f}, {_dnd_boot_hi:+.4f}] "
       f"({N_BOOT_AUC} pair resamples shared across all four cells)")
+
+# %%
+# Robustness on the LEAK-FREE subset (exploratory, no card change): the stale-full_name
+# caveat above names the un-recomposable records that keep a clean native full_name in the
+# raw arm. Restricting the SAME shared subsample to pairs where BOTH sides were
+# re-composed removes that leak entirely — the four AUCs re-scored there say whether
+# P1/P2 stand on their own.
+_recomposed = (raw_eval["given_name"].isna().to_numpy()
+               & ~eval_full["given_name"].isna().to_numpy())
+_recomposed_ids = set(raw_eval.loc[_recomposed, "record_id"].astype(str))
+_rng_lf = np.random.default_rng(PRIMARY_SEED + 88)  # auc_table's subsample draw, replayed
+_idx_lf = (np.sort(_rng_lf.choice(len(upairs), size=AUC_CAP, replace=False))
+           if len(upairs) > AUC_CAP else np.arange(len(upairs)))
+_lf = (upairs["a"].iloc[_idx_lf].isin(_recomposed_ids).to_numpy()
+       & upairs["b"].iloc[_idx_lf].isin(_recomposed_ids).to_numpy())
+_lab_lf = np.asarray(UP_TRUE, bool)[_idx_lf][_lf]
+LF_AUCS = {k: fast_auc(v[_idx_lf][_lf], _lab_lf) for k, v in _flat.items()}
+LF_FS_DROP = LF_AUCS["parsed|fs_standin"] - LF_AUCS["raw|fs_standin"]
+LF_EMB_DROP = LF_AUCS["parsed|embedding"] - LF_AUCS["raw|embedding"]
+LF_DND = LF_FS_DROP - LF_EMB_DROP
+LF_P1 = bool(np.sign(LF_AUCS["parsed|embedding"] - LF_AUCS["parsed|fs_standin"])
+             == np.sign(LF_AUCS["raw|embedding"] - LF_AUCS["raw|fs_standin"]))
+LF_P2_DIR = bool(LF_DND > 0)
+print(f"leak-free robustness (point estimates, exploratory): {int(_lf.sum()):,} of "
+      f"{len(_idx_lf):,} subsampled pairs have NO un-recomposable record on either side; "
+      f"there: parsed fs {LF_AUCS['parsed|fs_standin']:.4f} / emb "
+      f"{LF_AUCS['parsed|embedding']:.4f}; raw fs {LF_AUCS['raw|fs_standin']:.4f} / emb "
+      f"{LF_AUCS['raw|embedding']:.4f} -> fs drop {LF_FS_DROP:+.4f} vs emb drop "
+      f"{LF_EMB_DROP:+.4f}, DnD {LF_DND:+.4f} — "
+      + ("P1's sign and P2's direction SURVIVE without the stale-full_name leak"
+         if (LF_P1 and LF_P2_DIR) else
+         f"P1 {LF_P1} / P2-direction {LF_P2_DIR} on the leak-free subset — the verdict "
+         "leans on the leak; read it with that weight"))
 tick("§10a PRS factorial computed", t_sec)
 
 # %%
@@ -1866,6 +2010,20 @@ registry.register(
             "embedding_fields": {"parsed": TEXT_ROLES, "raw": RAW_ROLES},
             "pair_universe": f"{min(len(upairs), AUC_CAP)} of {len(upairs)} union pairs "
                              "(same subsample in all four cells)",
+        },
+        "auc_representation": "BOTH embedding cells score the RAW cosine (the declared "
+                              "rank-native AUC representation — see nse03 meta): the "
+                              "parsed->raw drop measures the parsing change alone, never "
+                              "a transform change",
+        "leakfree_subset": {
+            "n_pairs": int(_lf.sum()), "of_subsample": len(_idx_lf),
+            "aucs": {k: float(v) for k, v in LF_AUCS.items()},
+            "fs_drop": float(LF_FS_DROP), "emb_drop": float(LF_EMB_DROP),
+            "dnd": float(LF_DND), "p1_sign_survives": LF_P1,
+            "p2_direction_survives": LF_P2_DIR,
+            "note": "pairs where NEITHER side is an un-recomposable record (no stale "
+                    "native full_name leak); point estimates — an exploratory robustness "
+                    "check, not a card clause",
         },
         "single_seed_caveat": "one encoder, one seed, pair-resample CIs — an EXPLORATORY "
                               "DEMONSTRATION",
@@ -1921,22 +2079,29 @@ _ = verdict_box(
     "PRS-01",
     outcome=prs01_outcome,
     evidence=(
-        f"prs01_parsing_factorial (tier {TIER}; EXPLORATORY). AUCs: parsed fs "
-        f"{prs_pts['parsed|fs_standin']['auc']:.4f} / emb "
+        f"prs01_parsing_factorial (tier {TIER}; EXPLORATORY). AUCs (both embedding cells "
+        "on the RAW cosine — one declared representation, so the drop is the parsing "
+        f"change alone): parsed fs {prs_pts['parsed|fs_standin']['auc']:.4f} / emb "
         f"{prs_pts['parsed|embedding']['auc']:.4f}; raw fs "
         f"{prs_pts['raw|fs_standin']['auc']:.4f} / emb "
         f"{prs_pts['raw|embedding']['auc']:.4f}. P1 {p1} (ranking sign parsed vs raw); "
         f"P2 {p2}: fs parsed->raw drop {_fs_drop['delta']:+.4f} vs embedding "
         f"{_emb_drop['delta']:+.4f}, shared-draw DnD {_dd_point:+.4f} "
-        f"[{_dnd_boot_lo:+.4f}, {_dnd_boot_hi:+.4f}]. Caveats carried: "
-        "pair-level AUC only, pair-resample CIs, the raw embedding arm re-serializes with "
-        "full_name (an eval-time field-set deviation the regime forces, stated in the "
-        f"card), {_kept_native:,} un-recomposable records ({_kept_native / len(eval_full):.1%}) "
-        "keep a stale NATIVE full_name — a clean-name leak into the raw embedding arm "
-        "(NB08's leak mechanism, quantified above) — and the encoder never trained on "
-        "raw-form strings; a raw-trained encoder on a leak-free composition is the "
-        "mid-tier follow-up this exploratory arm motivates, not a claim it makes. "
-        "SINGLE-SEED EXPLORATORY DEMONSTRATION — never an adoption gate (PLAN §3)."
+        f"[{_dnd_boot_lo:+.4f}, {_dnd_boot_hi:+.4f}]. Leak-free robustness (point "
+        f"estimates, {int(_lf.sum()):,} pairs with no un-recomposable record on either "
+        f"side): fs drop {LF_FS_DROP:+.4f} vs emb drop {LF_EMB_DROP:+.4f}, DnD "
+        f"{LF_DND:+.4f} — P1's sign {'survives' if LF_P1 else 'does NOT survive'} and "
+        f"P2's direction {'survives' if LF_P2_DIR else 'does NOT survive'} without the "
+        "stale-full_name leak. Caveats carried: pair-level AUC only, pair-resample CIs, "
+        "the raw embedding arm re-serializes with full_name (an eval-time field-set "
+        f"deviation the regime forces, stated in the card), {_kept_native:,} "
+        f"un-recomposable records ({_kept_native / len(eval_full):.1%}) keep a stale "
+        "NATIVE full_name — a clean-name leak into the raw embedding arm (NB08's leak "
+        "mechanism, quantified above and bounded by the leak-free subset) — and the "
+        "encoder never trained on raw-form strings; a raw-trained encoder on a leak-free "
+        "composition is the mid-tier follow-up this exploratory arm motivates, not a "
+        "claim it makes. SINGLE-SEED EXPLORATORY DEMONSTRATION — never an adoption gate "
+        "(PLAN §3)."
     ),
     registry=registry,
 )

@@ -1636,6 +1636,15 @@ COEFF_PROVENANCE = {
                    f"edges/s [{CLU01_PROVENANCE}]",
     "bytes_per_vector": "per design: dim x bytes/component (binary dim/8) — the EFF-01 "
                         "axis, target-tier dim 384 per the tier table",
+    "smoke_shape_assumption": "encode_rps / score_pairs_ps / index_build_s_per_M were "
+                              f"measured at THIS run's smoke shape ({EMB.shape[1]}-d "
+                              f"embeddings, {MODEL_SHAPE['layers']}-layer encoder); the "
+                              "384-d scenarios inherit them UNADJUSTED — only "
+                              "bytes_per_vector changes with dim (a 384-d/6-layer "
+                              "encoder encodes slower, and 384-d dot products / index "
+                              "builds cost ~3x per pair) — an additional labeled "
+                              "assumption of the projection that the tier=target "
+                              "re-measurement removes",
 }
 COEFFS = {"encode_rps": ENC_RATE, "index_build_s_per_M": INDEX_S_PER_M,
           "score_pairs_ps": SCORE_PAIRS_PS, "cc_edges_ps": CC_EDGES_PS}
@@ -1644,6 +1653,7 @@ print("measured coefficients (single-thread, this container — a concurrent wor
       "inflate them 2-4x):")
 for k, v in COEFFS.items():
     print(f"  {k} = {v:,.0f}\n      <- {COEFF_PROVENANCE[k]}")
+print(f"  shape assumption: {COEFF_PROVENANCE['smoke_shape_assumption']}")
 print(f"prices (recorded cloud list-price planning constants, NOT measurements): "
       f"{PRICES} — A100-80GB on-demand per GPU-h, per-core CPU-h to match the "
       "single-thread coefficients; costs scale linearly if your prices differ")

@@ -895,11 +895,16 @@ _ = conjecture_card(
 # measured at this exact budget, and the graph notebook 07 warned is percolation fuel.
 # Scores are raw cosines pushed through **CAL-01's global isotonic map** (the calibrator
 # whose held-out ECE was just measured; fitted on calfit only). Two honest notes, stated
-# before the numbers: (a) for the threshold-dial schemes an isotonic map is monotone, so it
-# reparameterizes the threshold axis rather than changing the attainable partitions — what
-# calibration buys *them* is a threshold that means something; (b) for greedy correlation
-# the map is load-bearing — its prob > 0.5 attraction rule reads the absolute probability
-# scale, which is exactly what calibration exists to make true.
+# before the numbers: (a) for the threshold-dial schemes the isotonic map is only *weakly*
+# monotone — piecewise-constant, many-to-one — so it **coarsens** the attainable partition
+# set: distinct cosines mapped onto the same probability step can never again be separated
+# by any threshold, and the threshold grid can only cut where the map steps (the distinct-
+# value count is measured in the output below). Clustering calibrated probabilities anyway
+# is a stated protocol choice — CLU-01's question is what the schemes do with the
+# probabilities the pipeline actually hands them, and a threshold on that scale means
+# something — not a claim of partition-invariance; (b) for greedy correlation the map is
+# load-bearing — its prob > 0.5 attraction rule reads the absolute probability scale,
+# which is exactly what calibration exists to make true.
 
 # %%
 t_sec = time.time()

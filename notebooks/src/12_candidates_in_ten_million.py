@@ -637,12 +637,33 @@ tick("§4e ceiling + register + leakage check", t_sec)
 # from the registered artifact.
 
 # %%
-fig = figures.line_with_ci(
-    registry, tier=cfg.run.tier, artifact="bas02_blocking_frontier",
-    x="k", y="pc", lo="pc_lo", hi="pc_hi", hue="method", logx=True,
+# Custom draw (not line_with_ci): the is_reference rows are a CEILING, not a fifth
+# contender — they render grey/dashed with no marker so the figure says what the prose
+# says. Measured method rows keep the line+CI-band vocabulary.
+def draw_frontier(ax, df, meta):
+    d = df[~df["is_reference"]]
+    for method, g in d.groupby("method"):
+        g = g.sort_values("k")
+        (line,) = ax.plot(g["k"], g["pc"], "-o", label=str(method), markersize=4.5)
+        ax.fill_between(g["k"], g["pc_lo"], g["pc_hi"], alpha=0.2,
+                        color=line.get_color(), linewidth=0)
+    ref = df[df["is_reference"]].sort_values("k")
+    if len(ref):
+        ax.plot(ref["k"], ref["pc"], "--", color="0.55", linewidth=1.6,
+                label="budget ceiling (reference)")
+        ax.annotate("max PC any top-k proposer could reach",
+                    (float(ref["k"].iloc[-1]), float(ref["pc"].iloc[-1])),
+                    textcoords="offset points", xytext=(-8, -11), ha="right",
+                    fontsize=7, color="0.45")
+    ax.set_xscale("log")
+    ax.set_xlabel("per-record candidate budget k (log)")
+    ax.set_ylabel("pair-completeness (entity-disjoint eval half)")
+    ax.legend(fontsize=8)
+
+
+fig = figures.plot_artifact(
+    registry, tier=cfg.run.tier, artifact="bas02_blocking_frontier", draw=draw_frontier,
     title="BAS-02 frontier: pair-completeness at matched candidate budget",
-    xlabel="per-record candidate budget k (log)",
-    ylabel="pair-completeness (entity-disjoint eval half)",
     figsize=(7.0, 4.4),
 )
 
