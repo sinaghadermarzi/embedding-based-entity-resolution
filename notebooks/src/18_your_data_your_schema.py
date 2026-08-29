@@ -42,7 +42,6 @@
 # representation in meta.
 
 # %%
-import json
 import subprocess
 import time
 
@@ -61,7 +60,6 @@ from er_lab.data import loaders
 from er_lab.data.loaders import load_ohio, load_onc
 from er_lab.data.schema import NON_TEXT_ROLES, ROLES
 from er_lab.eval.bootstrap import bootstrap_ci, paired_delta
-from er_lab.eval.metrics import blocking_metrics
 from er_lab.eval.operating_points import find_threshold_for_precision
 from er_lab.infra.artifacts import ArtifactRegistry
 from er_lab.infra.device import describe_platform
@@ -620,9 +618,9 @@ def fs_agreement(recs_a: pd.DataFrame, recs_b: pd.DataFrame,
     for fld in tuple(fuzzy) + tuple(exact):
         if fld not in recs_a.columns or fld not in recs_b.columns:
             continue
-        va = recs_a[fld].astype("string").to_numpy()
-        vb = recs_b[fld].astype("string").to_numpy()
-        ok = ~(pd.isna(va) | pd.isna(vb) | (va == "") | (vb == ""))
+        va = recs_a[fld].astype("string").fillna("").to_numpy()
+        vb = recs_b[fld].astype("string").fillna("").to_numpy()
+        ok = (va != "") & (vb != "")  # NA and '' are both blank (the loaders' contract)
         sim = np.zeros(n)
         if fld in fuzzy:
             sim[ok] = [jellyfish.jaro_winkler_similarity(str(x), str(y))
@@ -751,8 +749,9 @@ tick("§3f retrain + encode", t_sec)
 # (`invariance_battery`). The pre-registered acceptance bars (card ADP-01 P2): each
 # should-hold slice's mean cosine within 0.15 of the baseline; each must-not-hold
 # separation AUC within 0.10. Two expected schema effects to watch, both informative:
-# Excel-serial DOBs defeat the `different_birth_year` probe (no parseable date to shift —
-# an *empty slice*, reported not scored), and the must-not-hold AUCs are scored against
+# Excel-serial DOBs defeat both the `different_birth_year` probe (no parseable date to
+# shift) and `format_drift` (dob is the only drift-able role this schema serializes) —
+# *empty slices*, reported not scored — and the must-not-hold AUCs are scored against
 # **pseudo-true** pairs, so they inherit the teacher's blind spots.
 
 # %%
@@ -829,6 +828,7 @@ def _batt_pass(r) -> float:
 
 batt_cmp["passes"] = batt_cmp.apply(_batt_pass, axis=1)
 _scoreable = batt_cmp[batt_cmp["passes"].notna()]
+_failing = _scoreable[_scoreable["passes"] == 0]["slice"].tolist()
 P2_BATTERY = bool(_scoreable["passes"].all()) and len(_scoreable) > 0
 print("\nacceptance table — ONC vs calibrated-corpus baseline (bars: mean_cos within "
       f"{BATTERY_TOL_COS} on should-hold, auc within {BATTERY_TOL_AUC} on must-not-hold):")
@@ -837,13 +837,15 @@ display(batt_cmp[["slice", "kind", "n", "mean_cos", "base_mean_cos", "auc_vs_tru
 _empty = batt_cmp[batt_cmp["n"] == 0]["slice"].tolist()
 print(f"empty-on-ONC slices (reported, not scored): {_empty} — the Excel-serial dob "
       "defeats the birth-year shift probe by construction (parse_dob cannot shift what "
-      "it cannot parse); that emptiness is schema information, not a pass")
+      "it cannot parse), and it empties format_drift too (dob is the only drift-able "
+      "role this schema serializes); that emptiness is schema information, not a pass")
 print(f"P2 (all {len(_scoreable)} scoreable slices pass): {P2_BATTERY}")
 STEP_ROWS.append(
     {"row_type": "step", "step": "c. invariance battery (acceptance)",
      "outcome": "PASS" if P2_BATTERY else "FAIL",
      "detail": f"{int(_scoreable['passes'].sum())}/{len(_scoreable)} scoreable slices "
-               f"pass; empty: {_empty}; must-not-hold AUCs vs PSEUDO-true pairs",
+               f"pass; failing: {_failing}; empty: {_empty}; must-not-hold AUCs vs "
+               "PSEUDO-true pairs",
      "n": float(len(_scoreable))}
 )
 tick("§3g battery", t_sec)
@@ -1194,7 +1196,7 @@ registry.register(
                  f"{PSEUDO_THR} over >= {PSEUDO_MIN_FIELDS} joint fields, transitive "
                  "closure) — NB11 circularity caveat: within-lab only, biased toward "
                  "string-based systems, blind where the teacher is blind",
-        "substrate": {"segments": ONC_SEGMENTS, "band_rows": int(len(onc)),
+        "substrate": {"segments": ONC_SEGMENTS, "band_rows": len(onc),
                       "band_policy": "contiguous head rows (last-name-sorted files keep "
                                      "duplicate clusters local; uniform sampling "
                                      "shatters them — measured in §3b)",
@@ -1302,9 +1304,14 @@ _ = verdict_box(
         f"{CONFIG_LINES_BAR}), package edits {PACKAGE_EDITS} (git-verified) -> {P1}. "
         f"P2: {int(_scoreable['passes'].sum())}/{len(_scoreable)} scoreable battery "
         f"slices within the pre-registered bars (mean_cos −{BATTERY_TOL_COS} should-hold, "
-        f"AUC −{BATTERY_TOL_AUC} must-not-hold) vs the calibrated-corpus baseline; empty "
-        f"slices {_empty} reported unscored (Excel-serial dob defeats the birth-year "
-        f"probe) -> {P2_BATTERY}. P3: NB04 audit NOT APPLICABLE on ONC (EnterpriseID "
+        f"AUC −{BATTERY_TOL_AUC} must-not-hold) vs the calibrated-corpus baseline"
+        + (f"; failing slices {_failing} — the invariance cost of the starved "
+           f"{_n_pool_pairs}-pair conservative pseudo-label pool (§3f), which is what "
+           "'not yet acceptance-ready at this budget' means concretely" if _failing
+           else "")
+        + f"; empty slices {_empty} reported unscored (Excel-serial dob defeats the "
+        f"birth-year probe and format_drift alike) -> {P2_BATTERY}. P3: NB04 audit NOT "
+        f"APPLICABLE on ONC (EnterpriseID "
         f"unique per row — measured; single release), generic-noise fallback stated with "
         f"its NSE-02 caveat -> {P3}. Transfer table: "
         + "; ".join(f"{str(r['claim']).split(':')[0]} {r['status']}"
@@ -1753,8 +1760,6 @@ if TIER == "target":
 else:
     N_NC_STATE, N_OH_STATE = 7.5e6, 8.0e6  # statewide planning sizes (±2x, PLAN §8)
     _enc_h = (N_NC_STATE + N_OH_STATE) / NC_ENC_RATE / 3600
-    _mk_ms = 1e3 * (len(mk_nc) and (0.0 + _t0 - _t0) or 0.0)  # placeholder-free below
-    _mk_rate = len(nc_eval) / max(SECTION_TIMES[-1][1], 1e-9)  # coarse, stated
     _pairs_25 = (N_NC_STATE + N_OH_STATE) * 25 / 2
     print(f"[RUN-IN-TARGET node] NC<->OH priced from THIS run's measured coefficients "
           f"(container, single seed, tier {TIER}):")

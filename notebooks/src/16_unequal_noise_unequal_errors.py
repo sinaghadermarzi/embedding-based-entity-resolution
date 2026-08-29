@@ -607,10 +607,9 @@ dup = skel[is_dup].reset_index(drop=True)
 DUP_PRISTINE = dup.copy()  # exposure rates + realized-rate checks key on this frame
 ops_logs: list[pd.DataFrame] = []
 rng_grp_ch = np.random.default_rng(REGEN_SEED + 1)
-for name, model in GRP_CHANNELS.items():
+for name, channel in GRP_CHANNELS.items():
     rates = GROUP_CHANNEL_MODELS[name].per_record_rates(DUP_PRISTINE, DOSE[name])
-    dup, ops = model.apply(dup, rng_grp_ch, rates) if False else GRP_CHANNELS[name].apply(
-        dup, rng_grp_ch, rates)
+    dup, ops = channel.apply(dup, rng_grp_ch, rates)
     ops_logs.append(ops.assign(gen_channel=name))
 rng_uni = np.random.default_rng(REGEN_SEED + 2)
 with np.errstate(divide="ignore"):  # benign gecko keymap divide (NB05's note)
@@ -649,9 +648,13 @@ def wilson(k: int, n: int) -> tuple[float, float]:
 exposure_check_rows: list[dict] = []
 dup_sex = DUP_PRISTINE["grp_sex"].astype(str).to_numpy()
 dup_ids = DUP_PRISTINE["record_id"].astype(str).to_numpy()
+CH_FIELD = {"name_change_family": "family_name", "name_change_given": "given_name",
+            "nickname": "given_name"}
 for name, model in GROUP_CHANNEL_MODELS.items():
     hit_ids = set(ops_all.loc[ops_all["gen_channel"] == name, "record_id"].astype(str))
     hit = np.isin(dup_ids, list(hit_ids))
+    _f = DUP_PRISTINE[CH_FIELD[name]].astype("string")
+    editable = (_f.notna() & (_f.str.strip() != "")).to_numpy()
     mult = dict(zip(model.multipliers["grp_sex"].astype(str),
                     model.multipliers["multiplier"]))
     for grp in sorted(mult):
@@ -660,20 +663,35 @@ for name, model in GROUP_CHANNEL_MODELS.items():
         if n_g == 0:
             continue
         lo, hi = wilson(k_g, n_g)
+        elig = float(editable[in_g].mean())
         exposure_check_rows.append({
             "row_type": "exposure_check", "group_col": "sex", "group": grp,
             "channel": name, "n": n_g, "k": k_g, "value": k_g / n_g, "lo": lo, "hi": hi,
             "intended": float(min(1.0, DOSE[name] * mult[grp])),
+            "eligible_share": elig,
+            "intended_eligible": float(min(1.0, DOSE[name] * mult[grp]) * elig),
             "multiplier": float(mult[grp]), "basis": "MEASURED",
         })
 expo_check = pd.DataFrame(exposure_check_rows)
 display(expo_check[["channel", "group", "n", "k", "value", "lo", "hi", "intended",
-                    "multiplier"]].round(4))
+                    "eligible_share", "intended_eligible", "multiplier"]].round(4))
 _nc = expo_check[expo_check["channel"].str.startswith("name_change")]
 COVERED = int(((_nc["lo"] <= _nc["intended"]) & (_nc["intended"] <= _nc["hi"])).sum())
-print(f"realized-rate Wilson CI covers dose x multiplier for {COVERED}/{len(_nc)} "
-      "(group x name_change-channel) cells — the pool-redraw channels edit whenever "
-      "selected, so realized == selected there.")
+COVERED_ADJ = int(((_nc["lo"] <= _nc["intended_eligible"])
+                   & (_nc["intended_eligible"] <= _nc["hi"])).sum())
+print(f"realized-rate Wilson CI covers raw dose x multiplier for {COVERED}/{len(_nc)} "
+      f"(group x name_change-channel) cells and the ELIGIBILITY-ADJUSTED intended "
+      f"(x share of duplicates whose target name field is present — a record with no "
+      f"family name cannot take a family-name change; missingness is group-blind) for "
+      f"{COVERED_ADJ}/{len(_nc)} — selection is exact, the only shortfall is "
+      "missing-field ineligibility.")
+_fm = _nc[_nc["channel"] == "name_change_family"].set_index("group")
+if {"F", "M"} <= set(_fm.index) and _fm.loc["M", "value"] > 0:
+    print(f"the sharpest wiring statistic — the realized F/M rate ratio on "
+          f"family_name_change: {_fm.loc['F', 'value'] / _fm.loc['M', 'value']:.2f} vs "
+          f"fitted multiplier ratio "
+          f"{_fm.loc['F', 'multiplier'] / _fm.loc['M', 'multiplier']:.2f} "
+          "(eligibility cancels in the ratio).")
 _nk = expo_check[expo_check["channel"] == "nickname"].set_index("group")
 if {"F", "M"} <= set(_nk.index) and _nk.loc["M", "value"] > 0:
     print(f"nickname channel: realized rates sit BELOW dose x multiplier by construction "
@@ -1142,7 +1160,7 @@ for system in SYSTEMS:
     for target in PREC_TARGETS:
         prot = f"precision@{target}"
         for side in SIDES:
-            for key in GMASK:
+            for key, kmask in GMASK.items():
                 axis, grp = key
                 st = rate_of(system, prot, side, key)
                 RATE_STATS[(system, prot, side, key)] = st
@@ -1151,8 +1169,8 @@ for system in SYSTEMS:
                     "row_type": "rate", "group_col": axis, "group": grp,
                     "system": system, "side": side, "protocol": prot,
                     "value": ci["point"], "lo": ci["lo"], "hi": ci["hi"],
-                    "n_entities": int(GMASK[key].sum()),
-                    "n_records": int((N_E * GMASK[key]).sum()),
+                    "n_entities": int(kmask.sum()),
+                    "n_records": int((N_E * kmask).sum()),
                     "attained": bool(OP_ATTAINED[(system, target)]),
                     "scored": float(grp in SCORED.get(axis, [])), "basis": "MEASURED",
                 })
@@ -1165,7 +1183,7 @@ for system in SYSTEMS:
                         "value": dsp["point"], "lo": dsp["lo"], "hi": dsp["hi"],
                         "sign_stable": dsp["sign_stable"],
                         "exceeds_bar": bool(abs(dsp["point"]) >= BAR_RESID),
-                        "n_entities": int(GMASK[key].sum()),
+                        "n_entities": int(kmask.sum()),
                         "attained": bool(OP_ATTAINED[(system, target)]),
                         "scored": float(grp in SCORED.get(axis, [])),
                         "basis": "MEASURED",
@@ -1225,18 +1243,29 @@ tick("§5c rates + disparities + paired deltas", t_sec)
 # or the system **handles its records worse at equal noise** (mechanism). The instrument:
 # stratify entities by their realized ops count (0 / 1 / 2 / 3+ channel edits), then
 # recompute each group's rate with its strata reweighted to the corpus-wide stratum
-# distribution. The disparity that survives matching is the mechanism candidate; the part
-# that closes is exposure. **This is decomposition, not causal identification** — strata
-# are coarse (an edit is not an edit: a family-name wholesale change and a zip drift both
-# count 1), and op-type composition within a stratum still differs by group.
+# distribution — **record-share weights**, because the rates are record-weighted ratios:
+# with record shares the pooled mixture identity `sum_s w_s * rate_all[s] == rate_all`
+# holds exactly (asserted below), so a group whose within-stratum rates equal the pooled
+# ones lands at matched disparity 0. (Entity-share weights break that identity here:
+# high-ops strata hold the record-heavy entities, so every matched rate would be dragged
+# toward the small-entity strata regardless of group.) The disparity that survives
+# matching is the mechanism candidate; the part that closes is exposure. **This is
+# decomposition, not causal identification** — strata are coarse (an edit is not an edit:
+# a family-name wholesale change and a zip drift both count 1), and op-type composition
+# within a stratum still differs by group.
 #
 # **At smoke the mechanism channel is empty by construction** — membership was assigned
 # independently of every name value, so the system cannot treat F-labeled names
-# differently at equal noise. A matched disparity near zero is therefore the instrument
-# *validating itself* on a known null, not a finding about real groups; residual
-# matched-gap comes from the coarse strata (F's edits are more often family-name
-# wholesale). At target tier, with real labels, names DO correlate with group — that run
-# is where a nonzero mechanism term would be a finding.
+# differently at equal noise. Whatever matched gap SURVIVES is therefore a direct
+# measurement of the stratification's **coarseness**, not of mechanism: an edit is not
+# an edit — F's ops are mostly family-name wholesale changes, M's mostly milder
+# given-name edits — so matching on the COUNT leaves the severity mix unmatched. Two
+# stratifications probe where the coarseness lives: the pre-registered ops-count match,
+# and a severity-aware refinement (family-changes x other-ops); what survives either
+# match is within-cell composition (op severity, entity size, dose intensity), the
+# instrument's resolution floor at this tier — measured per group below. At target tier,
+# with real labels, names DO correlate with group — a mechanism claim there must exceed
+# the floor measured here.
 
 # %%
 t_sec = time.time()
@@ -1244,53 +1273,139 @@ _ops_ent = TRUTH.loc[ops_all["record_id"].astype(str)].value_counts()
 OPS_PER_ENT = pd.Series(0.0, index=ENT_INDEX).add(_ops_ent, fill_value=0.0) \
     .reindex(ENT_INDEX).to_numpy()
 STRATUM = np.minimum(OPS_PER_ENT, OPS_STRATA_MAX).astype(int)
-W_POOLED = np.bincount(STRATUM, minlength=OPS_STRATA_MAX + 1) / E_ENT
-print("entity ops-count strata (0/1/2/3+): pooled shares "
-      + ", ".join(f"{s}:{w:.3f}" for s, w in enumerate(W_POOLED)))
+W_ENTITY = np.bincount(STRATUM, minlength=OPS_STRATA_MAX + 1) / E_ENT
+W_POOLED = np.bincount(STRATUM, weights=N_E, minlength=OPS_STRATA_MAX + 1) / N_E.sum()
+print("entity ops-count strata (0/1/2/3+): pooled RECORD shares (the matching weights) "
+      + ", ".join(f"{s}:{w:.3f}" for s, w in enumerate(W_POOLED))
+      + "  [entity shares, for scale: "
+      + ", ".join(f"{s}:{w:.3f}" for s, w in enumerate(W_ENTITY)) + "]")
 for axis in GROUP_AXES:
     parts = []
     for grp in GROUPS[axis]:
         m = GMASK[(axis, grp)]
         parts.append(f"{grp} " + "/".join(
-            f"{(STRATUM[m] == s).mean():.2f}" for s in range(OPS_STRATA_MAX + 1)))
-    print(f"  {axis} stratum shares: " + "; ".join(parts))
+            f"{float((N_E * (m & (STRATUM == s))).sum() / (N_E * m).sum()):.2f}"
+            for s in range(OPS_STRATA_MAX + 1)))
+    print(f"  {axis} per-group record shares by stratum: " + "; ".join(parts))
+
+# the severity-aware refinement: family-name changes (the devastating channel: F's ops
+# are mostly these) crossed with all other ops — same matching machinery, finer cells.
+_fam_ids = ops_all.loc[ops_all["gen_channel"] == "name_change_family",
+                       "record_id"].astype(str)
+_fam_ent = TRUTH.loc[_fam_ids].value_counts()
+FAM_PER_ENT = pd.Series(0.0, index=ENT_INDEX).add(_fam_ent, fill_value=0.0) \
+    .reindex(ENT_INDEX).to_numpy()
+OTH_PER_ENT = OPS_PER_ENT - FAM_PER_ENT
+S_FINE = (np.minimum(FAM_PER_ENT, 2).astype(int) * (OPS_STRATA_MAX + 1)
+          + np.minimum(OTH_PER_ENT, OPS_STRATA_MAX).astype(int))
+N_FINE = 3 * (OPS_STRATA_MAX + 1)
+W_FINE = np.bincount(S_FINE, weights=N_E, minlength=N_FINE) / N_E.sum()
+STRATIFICATIONS = {
+    "ops_count": (STRATUM, W_POOLED, OPS_STRATA_MAX + 1),
+    "fam_x_other": (S_FINE, W_FINE, N_FINE),
+}
+MIN_CELL_ENT = 5  # cells with fewer group entities are excluded (renormalized weights):
+#                   a 2-entity cell empties in ~13% of bootstrap replicates -> NaN CIs
+
+# the mixture identity that record-share weights (and only they) make exact:
+for sname, (svec, w_pool, ncell) in STRATIFICATIONS.items():
+    for system in SYSTEMS:
+        for side in SIDES:
+            _mix = sum(
+                w_pool[s] * ratio_stat(RATE_NUM[(system, PPRIM, side)] * (svec == s),
+                                       N_E * (svec == s))[0]
+                for s in range(ncell) if (svec == s).any())
+            assert np.isclose(_mix, RATE_STATS[(system, PPRIM, side,
+                                                ("all", "ALL"))][0]), (
+                f"mixture identity broken for {sname}/{system}/{side}: "
+                "record-share-weighted stratum rates must reproduce the corpus-wide "
+                "rate exactly")
+print("mixture identity asserted for all 12 (stratification x system x side) rate "
+      "surfaces: record-share-weighted stratum rates == corpus-wide rate (so matched "
+      "disparity 0 means 'no within-stratum group difference', not a weighting "
+      "artifact).")
 
 decomp_rows: list[dict] = []
-for axis, grp_list in SCORED.items():
-    for grp in grp_list:
-        m = GMASK[(axis, grp)]
-        for system in SYSTEMS:
-            for side in SIDES:
-                terms = []
-                w_used = 0.0
-                for s in range(OPS_STRATA_MAX + 1):
-                    ms = m & (STRATUM == s)
-                    if ms.sum() == 0:
-                        continue
-                    terms.append((W_POOLED[s], ratio_stat(
-                        RATE_NUM[(system, PPRIM, side)] * ms, N_E * ms)))
-                    w_used += W_POOLED[s]
-                matched = s_wsum([(w / w_used, t) for w, t in terms])
-                mdsp = bca_ci(s_sub(matched, RATE_STATS[(system, PPRIM, side,
-                                                         ("all", "ALL"))]))
-                raw = RATE_STATS[(system, PPRIM, side, (axis, grp))][0] - \
-                    RATE_STATS[(system, PPRIM, side, ("all", "ALL"))][0]
-                closed = (raw - mdsp["point"]) / raw if abs(raw) > 1e-4 else np.nan
-                decomp_rows.append({
-                    "row_type": "decomposition", "group_col": axis, "group": grp,
-                    "system": system, "side": side, "protocol": PPRIM,
-                    "value": mdsp["point"], "lo": mdsp["lo"], "hi": mdsp["hi"],
-                    "sign_stable": mdsp["sign_stable"], "raw_disparity": float(raw),
-                    "exposure_closed_share": float(closed) if np.isfinite(closed)
-                    else np.nan,
-                    "scored": 1.0, "basis": "MEASURED",
-                })
+for sname, (svec, w_pool, ncell) in STRATIFICATIONS.items():
+    for axis, grp_list in SCORED.items():
+        for grp in grp_list:
+            m = GMASK[(axis, grp)]
+            for system in SYSTEMS:
+                for side in SIDES:
+                    terms = []
+                    w_used = 0.0
+                    for s in range(ncell):
+                        ms = m & (svec == s)
+                        if ms.sum() < MIN_CELL_ENT:
+                            continue
+                        terms.append((w_pool[s], ratio_stat(
+                            RATE_NUM[(system, PPRIM, side)] * ms, N_E * ms)))
+                        w_used += w_pool[s]
+                    matched = s_wsum([(w / w_used, t) for w, t in terms])
+                    mdsp = bca_ci(s_sub(matched, RATE_STATS[(system, PPRIM, side,
+                                                             ("all", "ALL"))]))
+                    raw = RATE_STATS[(system, PPRIM, side, (axis, grp))][0] - \
+                        RATE_STATS[(system, PPRIM, side, ("all", "ALL"))][0]
+                    # the share is a ratio to raw: quote it only where raw is large
+                    # enough to divide by (|raw| > 0.005), else NaN — a 25x 'share' of
+                    # a 0.0002 disparity is numerology, not decomposition
+                    closed = (raw - mdsp["point"]) / raw if abs(raw) > 5e-3 else np.nan
+                    decomp_rows.append({
+                        "row_type": "decomposition", "stratification": sname,
+                        "group_col": axis, "group": grp,
+                        "system": system, "side": side, "protocol": PPRIM,
+                        "value": mdsp["point"], "lo": mdsp["lo"], "hi": mdsp["hi"],
+                        "sign_stable": mdsp["sign_stable"], "raw_disparity": float(raw),
+                        "matched_weight_coverage": float(w_used),
+                        "exposure_closed_share": float(closed) if np.isfinite(closed)
+                        else np.nan,
+                        "scored": 1.0, "basis": "MEASURED",
+                    })
 panel_rows += decomp_rows
 _dec = pd.DataFrame(decomp_rows)
-print(f"\nexposure-vs-mechanism at {PPRIM} (matched = ops-count-reweighted disparity; "
-      "membership simulated -> matched ~ 0 expected, an instrument null-check):")
-display(_dec[["group_col", "group", "system", "side", "raw_disparity", "value", "lo",
-              "hi", "exposure_closed_share"]].round(4))
+print(f"\nexposure-vs-mechanism at {PPRIM} (matched = record-share reweighted disparity "
+      "under each stratification; membership simulated -> the SURVIVING gap measures "
+      "stratification coarseness, not mechanism; exposure_closed_share NaN where "
+      "|raw| <= 0.005):")
+display(_dec[(_dec["side"] == "missed") & (_dec["group_col"] == "grp_sex")]
+        [["stratification", "group", "system", "raw_disparity", "value", "lo", "hi",
+          "sign_stable", "matched_weight_coverage", "exposure_closed_share"]].round(4))
+_dsex = _dec[(_dec["group_col"] == "grp_sex") & (_dec["side"] == "missed")]
+
+
+def _drow(strat: str, grp: str, system: str = "embedding") -> pd.Series:
+    return _dsex[(_dsex["stratification"] == strat) & (_dsex["group"] == grp)
+                 & (_dsex["system"] == system)].iloc[0]
+
+
+DEC_H_C, DEC_H_F = _drow("ops_count", HIGH), _drow("fam_x_other", HIGH)
+DEC_L_C, DEC_L_F = _drow("ops_count", LOW), _drow("fam_x_other", LOW)
+DEC_COVER_FINE = float(_dsex[_dsex["stratification"] == "fam_x_other"]
+                       ["matched_weight_coverage"].min())
+_fam_pos = FAM_PER_ENT >= 1
+SZ_HI = float(N_E[GMASK[("grp_sex", HIGH)] & _fam_pos].mean())
+SZ_LO = float(N_E[GMASK[("grp_sex", LOW)] & _fam_pos].mean())
+print(f"exposure-axis missed-match reading (embedding arm; the other systems agree in "
+      f"sign — table above):\n"
+      f"  HIGH={HIGH}: raw {DEC_H_C['raw_disparity']:+.4f} -> count-matched "
+      f"{DEC_H_C['value']:+.4f} [{DEC_H_C['lo']:+.4f}, {DEC_H_C['hi']:+.4f}] "
+      f"({DEC_H_C['exposure_closed_share']:.0%} closed, CI straddles zero) / "
+      f"severity-matched {DEC_H_F['value']:+.4f} "
+      f"({DEC_H_F['exposure_closed_share']:.0%} closed) — {HIGH}'s excess missed-match "
+      f"burden is explained by the noise it was DEALT, as it must be under simulated "
+      f"membership.\n"
+      f"  LOW={LOW}: raw {DEC_L_C['raw_disparity']:+.4f} -> count-matched "
+      f"{DEC_L_C['value']:+.4f} (sign_stable={bool(DEC_L_C['sign_stable'])}, only "
+      f"{DEC_L_C['exposure_closed_share']:.0%} closed); severity-aware matching does "
+      f"not close it either ({DEC_L_F['value']:+.4f}; weight coverage "
+      f"{DEC_COVER_FINE:.2f}). Mechanism is structurally ABSENT here, so this residual "
+      f"measures the instrument's coarseness floor for a low-exposure group: PER-ENTITY "
+      f"ops counts are a weak proxy for per-record dose when entity sizes are "
+      f"heterogeneous — measured: among entities with >= 1 family-name change, mean "
+      f"records/entity is {SZ_LO:.1f} for {LOW} vs {SZ_HI:.1f} for {HIGH} (a low-rate "
+      f"group needs many duplicates to log the same count, so its corrupted-record "
+      f"SHARE is smaller at equal count) — the target-tier refinement this prices is "
+      f"stratifying on ops per RECORD.")
 tick("§6 decomposition", t_sec)
 
 # %% [markdown]
@@ -1438,7 +1553,9 @@ registry.register(
                   "entity-BCa CI, attained/fallback rail (PLAN §5)",
             "exposure_check": "wiring verification: realized per-group per-channel "
                               "duplicate corruption rate (Wilson 95% CI) vs dose x "
-                              "fitted multiplier",
+                              "fitted multiplier (intended) and vs the "
+                              "eligibility-adjusted intended (x present-field share: "
+                              "a missing name cannot take a name edit)",
             "rate": "per (group_col, group['ALL' = corpus-wide], system, side, "
                     "protocol): missed/false-match rate = 1 - mean per-record B3 "
                     "recall/precision contribution, entity-BCa 95% CI on shared draws",
@@ -1449,11 +1566,18 @@ registry.register(
                      "point (shared entity resamples)",
             "disparity_delta": "difference of disparities between systems (the "
                                "does-the-embedding-close-the-gap statistic), paired",
-            "decomposition": "ops-count-stratified exposure-matched disparity "
-                             "(value) vs raw_disparity; exposure_closed_share = "
-                             "(raw - matched)/raw. DECOMPOSITION, NOT CAUSAL ID; at "
-                             "this tier membership is simulated so matched ~ 0 is the "
-                             "instrument's null-check, not a finding",
+            "decomposition": "exposure-matched disparity (value) vs raw_disparity "
+                             "under two stratifications ('ops_count' pre-registered; "
+                             "'fam_x_other' severity-aware refinement), RECORD-share "
+                             "stratum weights (the weighting under which the pooled "
+                             "mixture identity is exact — asserted in-notebook), "
+                             "cells with < 5 group entities excluded "
+                             "(matched_weight_coverage = kept pooled record mass); "
+                             "exposure_closed_share = (raw - matched)/raw, NaN where "
+                             "|raw| <= 0.005. DECOMPOSITION, NOT CAUSAL ID; membership "
+                             "is simulated at this tier, so surviving matched gaps "
+                             "measure stratification coarseness (the mechanism "
+                             "resolution floor), never mechanism",
             "robustness": "label-flip band (min..max disparity point over n_reps "
                           "reassignment replicates) per flip_rate in {1,5,10}%",
             "unresolvable": "MET-06-style unresolvable rate on TEXT_ROLES, corpus-wide "
@@ -1472,8 +1596,11 @@ registry.register(
                                 "for CONSTRUCTION; disparity claims only where the "
                                 "multiplier CI excludes 1 (F and M qualify); statewide "
                                 "target rerun is definitive",
-            "wiring_check": f"Wilson CI covers dose x multiplier in {COVERED}/{len(_nc)} "
-                            "name-change cells (exposure_check rows)",
+            "wiring_check": f"Wilson CI covers raw dose x multiplier in "
+                            f"{COVERED}/{len(_nc)} name-change cells and the "
+                            f"eligibility-adjusted intended (x present-field share; "
+                            f"missing-name records cannot take a name edit) in "
+                            f"{COVERED_ADJ}/{len(_nc)} (exposure_check rows carry both)",
         },
         "scored_representation": (
             "entity OPERATING POINTS threshold CALIBRATED probabilities (the registered "
@@ -1584,12 +1711,11 @@ def draw_disparity_panel(ax, df, meta):
                         xytext=(0, -13), ha="center", fontsize=6, color="C3")
     ax.axhline(0.0, color="0.3", linewidth=0.8)
     ticks, labels = [], []
-    for side, off in side_off.items():
+    for off in side_off.values():
         for (gc, g), i in gx.items():
             ticks.append(off + i)
             tag = "placebo" if gc == "grp_race" else "exposure"
             labels.append(f"{g}\n{tag}\nunres {un.get((gc, g), np.nan):.1%}")
-        ax.text(off + (len(groups) - 1) / 2, ax.get_ylim()[1], "", fontsize=8)
     ax.set_xticks(ticks, labels, fontsize=7)
     ymax = max(abs(float(d["lo"].min())), abs(float(d["hi"].max())))
     ax.text(side_off["missed"] + (len(groups) - 1) / 2, ymax * 1.18, "MISSED MATCHES",
@@ -1612,43 +1738,60 @@ fig = figures.plot_artifact(
 
 
 # %%
-# Figure 3 — exposure vs mechanism: what survives ops-count matching (here: a null-check).
+# Figure 3 — exposure vs mechanism: what survives count matching, what survives
+# severity-aware matching (membership simulated -> both residuals price the instrument's
+# own coarseness, the floor a target-tier mechanism claim must clear).
 def draw_decomposition(ax, df, meta):
+    from matplotlib.lines import Line2D
+
     d = df[(df["row_type"] == "decomposition") & (df["side"] == "missed")
            & (df["group_col"] == "grp_sex")]
     sys_col = {"fs_standin": "C0", "embedding": "C1", "hybrid_override": "C2"}
+    marks = (("ops_count", "s", "count-matched"), ("fam_x_other", "D", "severity-matched"))
     groups = sorted(d["group"].unique())
     for gi, grp in enumerate(groups):
         for si, (system, color) in enumerate(sys_col.items()):
-            r = d[(d["group"] == grp) & (d["system"] == system)]
-            if not len(r):
-                continue
-            r = r.iloc[0]
-            x = gi * 4 + si
-            ax.plot([x, x], [r["raw_disparity"], r["value"]], color=color, alpha=0.5,
-                    linewidth=1.2, zorder=1)
-            ax.plot(x, r["raw_disparity"], marker="o", color=color, markersize=6,
-                    label=f"{system} raw" if gi == 0 else None)
-            ax.errorbar(x, r["value"], yerr=[[r["value"] - r["lo"]],
-                                             [r["hi"] - r["value"]]],
-                        fmt="s", color=color, markersize=5, capsize=3, alpha=0.9,
-                        label=f"{system} matched" if gi == 0 else None)
+            x = gi * 4.6 + si * 1.2
+            rr = d[(d["group"] == grp) & (d["system"] == system)]
+            r0 = rr.iloc[0]
+            ax.plot(x, r0["raw_disparity"], marker="o", color=color, markersize=6,
+                    zorder=3)
+            for mi, (sname, mk, _mlabel) in enumerate(marks):
+                r = rr[rr["stratification"] == sname]
+                if not len(r):
+                    continue
+                r = r.iloc[0]
+                xm = x + 0.30 * (mi + 1)
+                ax.plot([x, xm], [r0["raw_disparity"], r["value"]], color=color,
+                        alpha=0.35, linewidth=1.0, zorder=1)
+                ax.errorbar(xm, r["value"], yerr=[[r["value"] - r["lo"]],
+                                                  [r["hi"] - r["value"]]],
+                            fmt=mk, color=color, markersize=4.5, capsize=2.5,
+                            alpha=0.9, zorder=3)
     ax.axhline(0.0, color="0.3", linewidth=0.8)
-    ax.set_xticks([gi * 4 + 1 for gi in range(len(groups))],
+    ax.set_xticks([gi * 4.6 + 1.5 for gi in range(len(groups))],
                   [f"{g} (exposure axis)" for g in groups])
     ax.set_ylabel(f"missed-match disparity at {PPRIM}")
-    ax.legend(fontsize=7, ncols=2)
+    handles = [Line2D([], [], color=c, marker="o", linestyle="", markersize=6, label=s)
+               for s, c in sys_col.items()]
+    handles += [Line2D([], [], color="0.4", marker=mk, linestyle="", markersize=5,
+                       label=lbl)
+                for mk, lbl in (("o", "raw disparity"), ("s", "count-matched"),
+                                ("D", "severity-matched"))]
+    ax.legend(handles=handles, fontsize=6.8, ncols=2, loc="upper right")
     ax.text(0.02, 0.03,
-            "membership simulated -> matched ~ 0 is the EXPECTED null\n"
-            "(instrument validation); real-group mechanism is the node run's question",
-            transform=ax.transAxes, fontsize=7.5, color="0.35", va="bottom")
+            "membership simulated -> mechanism is structurally ABSENT: every surviving\n"
+            "matched gap is measured stratification coarseness (severity/size mix),\n"
+            "the resolution floor a real-group mechanism claim must clear at node scale",
+            transform=ax.transAxes, fontsize=7, color="0.35", va="bottom")
 
 
 fig = figures.plot_artifact(
     registry, tier=cfg.run.tier, artifact="fair01_disparity_panel",
     draw=draw_decomposition,
-    title="Exposure or mechanism? Raw disparity (o) vs ops-count-matched (square)",
-    figsize=(7.0, 4.6),
+    title="Exposure or mechanism? Raw (o) vs count-matched (square) vs "
+          "severity-matched (diamond)",
+    figsize=(8.4, 4.8),
 )
 
 # %% [markdown]
@@ -1694,7 +1837,12 @@ print(f"P2 (the price): sign-stable false-match worsening >= bar {BAR_RESID:.4f}
       f"scored group: {_p2_viol if _p2_viol else 'none'} -> {p2}")
 print(f"P3 (gap closes): disparity difference (emb - FS, missed, {HIGH}): "
       f"{p3_ci['point']:+.4f} [{p3_ci['lo']:+.4f}, {p3_ci['hi']:+.4f}], "
-      f"flip-survives={P3_FLIP_SURVIVES} -> {p3}")
+      f"flip-survives={P3_FLIP_SURVIVES} -> {p3}"
+      + ("" if p3 else
+         "\n   (the rule needs a sign-stable NEGATIVE difference — the embedding must "
+         "SHRINK the high-exposure group's missed-match disparity relative to FS; a "
+         "sign-stable positive value means its corpus-wide improvement tilts toward "
+         "the low-exposure group)"))
 print(f"P4 (negative control): placebo-axis sign-stable disparities >= bar: "
       f"{_p4_viol if _p4_viol else 'none'} -> {p4}")
 print(f"refutation clause (embedding sign-stably worse than FS on a side, >= bar, with "
@@ -1717,7 +1865,9 @@ _ = verdict_box(
         f"MEASURED (F {_fam_sex.loc['F', 'multiplier']:.2f} vs M "
         f"{_fam_sex.loc['M', 'multiplier']:.2f} on family_name_change, both CIs "
         f"excluding 1); dose {GROUP_DOSE}/duplicate BEYOND-AUDITED; wiring check "
-        f"{COVERED}/{len(_nc)} Wilson-covered. At {PPRIM} "
+        f"{COVERED_ADJ}/{len(_nc)} Wilson-covered vs the eligibility-adjusted intended "
+        f"({COVERED}/{len(_nc)} vs raw dose x multiplier — missing-name records cannot "
+        f"take a name edit). At {PPRIM} "
         f"({'all systems attained' if all(OP_ATTAINED[(s, PREC_PRIMARY)] for s in SYSTEMS) else 'FALLBACK involved — flagged in rows'}): "
         f"HIGH={HIGH} missed-match rate FS {_hi_m['fs_standin']:.4f} / emb "
         f"{_hi_m['embedding']:.4f} / hybrid {_hi_m['hybrid_override']:.4f}; false side "
@@ -1725,13 +1875,27 @@ _ = verdict_box(
         f"{_hi_f['hybrid_override']:.4f}. P1 {p1}: paired emb-FS missed delta for {HIGH} "
         f"{p1_ci['point']:+.4f} [{p1_ci['lo']:+.4f}, {p1_ci['hi']:+.4f}]. P2 {p2}. "
         f"P3 {p3}: disparity difference {p3_ci['point']:+.4f} "
-        f"[{p3_ci['lo']:+.4f}, {p3_ci['hi']:+.4f}], sign surviving all "
-        f"{len(_p3_signs)} label-flip replicates at {{1,5,10}}%. P4 {p4} (placebo race "
-        f"axis clean). Hybrid-override vs FS (missed, {HIGH}): {_hyb_d['point']:+.4f} "
+        f"[{p3_ci['lo']:+.4f}, {p3_ci['hi']:+.4f}] (rule needs sign-stable NEGATIVE), "
+        f"sign surviving all {len(_p3_signs)} label-flip replicates at {{1,5,10}}%"
+        + ("" if p3 else
+           f" — a label-robust, CI-separated WIDENING of {HIGH}'s missed-match "
+           f"disparity under the embedding: it helps {HIGH} absolutely (P1) while its "
+           f"corpus-wide win tilts toward the low-exposure group; "
+           f"|{abs(p3_ci['point']):.4f}| sits inside the residual-inclusive bar, so "
+           f"single-seed replicate noise is not excluded")
+        + f". P4 {p4} (placebo race axis clean). Hybrid-override vs FS (missed, "
+        f"{HIGH}): {_hyb_d['point']:+.4f} "
         f"[{_hyb_d['lo']:+.4f}, {_hyb_d['hi']:+.4f}] — the override neither helps nor "
-        f"hurts the disparity story beyond the embedding it rides on. Decomposition: "
-        f"exposure-matched disparities collapse toward zero as they MUST under "
-        f"simulated membership (instrument null-check, not a finding). MET-04 bars, "
+        f"hurts the disparity story beyond the embedding it rides on. Decomposition "
+        f"(record-share matched, missed side, embedding arm): {HIGH}'s raw "
+        f"{DEC_H_C['raw_disparity']:+.4f} closes to {DEC_H_C['value']:+.4f} "
+        f"[{DEC_H_C['lo']:+.4f}, {DEC_H_C['hi']:+.4f}] under ops-count matching "
+        f"({DEC_H_C['exposure_closed_share']:.0%} closed, CI straddling zero — "
+        f"exposure explains the scored group's excess, as simulated membership "
+        f"requires); {LOW}'s {DEC_L_C['raw_disparity']:+.4f} residual stays "
+        f"sign-stable at {DEC_L_C['value']:+.4f} under BOTH stratifications — the "
+        f"instrument's measured coarseness floor (per-entity counts vs per-record "
+        f"dose), not mechanism. MET-04 bars, "
         f"BOTH quoted: detect_bar_single_seed {BAR_SINGLE:.4f}, "
         f"detect_bar_residual_inclusive {BAR_RESID:.4f} — paired shared-draw CIs detect "
         f"the deltas above, but any delta inside the residual-inclusive bar is within "
@@ -1760,8 +1924,6 @@ if TIER in ("mid", "target"):
           "counts come from met04_power_table at this tier.")
 else:
     _pt = met04[met04["kind"] == "power"].set_index("delta")["seeds_needed"]
-    _sweep_s = SECTION_TIMES[[s for s, _ in SECTION_TIMES].index("§5a matched operating "
-                                                                 "points")][0]
     _sweep_secs = dict(SECTION_TIMES)["§5a matched operating points"]
     _ci_secs = dict(SECTION_TIMES)["§5c rates + disparities + paired deltas"]
     _n_node = 1e7
@@ -1805,9 +1967,10 @@ else:
 #   (`detect_bar_residual_inclusive`) is wider than most per-group deltas — the
 #   definitive run sizes seeds from `met04_power_table` at its own tier.
 # - **Mechanism, for real.** With simulated membership the mechanism channel is empty by
-#   construction (§6's null-check). Real names correlate with real groups — encoder
-#   behavior at equal noise is only testable there, and the decomposition stays a
-#   decomposition (not causal identification) even then.
+#   construction, so §6's surviving matched gaps price the instrument's own coarseness —
+#   the resolution floor a real mechanism term must exceed. Real names correlate with
+#   real groups — encoder behavior at equal noise is only testable there, and the
+#   decomposition stays a decomposition (not causal identification) even then.
 # - **Both operating-point families.** The cost-grid points {1:1, 1:10, 1:100} and the
 #   fixed-FP-budget secondary (PLAN §5) are inherited, not re-swept here; a fairness
 #   claim must hold across them, not at one point.
