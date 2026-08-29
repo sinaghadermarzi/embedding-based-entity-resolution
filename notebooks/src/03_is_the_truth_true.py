@@ -586,11 +586,13 @@ _ = conjecture_card(
 
 # %% [markdown]
 # The four field sets, from the `nc_voter` declared roles. `snapshot_date` is excluded (constant
-# within a snapshot — it pads every tuple equally and distinguishes nothing); `record_id` is
-# re-keyed as `county_id:voter_reg_num` because NC's registration numbers are only unique per
-# county — the same line of code that makes the statewide target run correct. Missing values
-# compare equal to missing values by design: two records that both lack a phone present identical
-# information to any matcher restricted to these fields.
+# within a snapshot — it pads every tuple equally and distinguishes nothing); `record_id` is the
+# schema-constructed compound key `county_id:voter_reg_num` — NC's registration numbers are only
+# unique per county, so the `nc_voter` DeclaredSchema builds the statewide-unique id itself (a
+# PR-review promotion of what this cell once repaired locally; the guard below now only qualifies
+# frames parsed before that change). Missing values compare equal to missing values by design:
+# two records that both lack a phone present identical information to any matcher restricted to
+# these fields.
 
 # %%
 ALL_ROLES = ["given_name", "middle_name", "family_name", "name_suffix", "age", "sex", "race",
@@ -604,9 +606,11 @@ FIELD_SETS = {
 }
 IDENT_SNAP = SNAP_B  # the newer snapshot — the corpus later notebooks actually dedup
 ident_frame = pd.read_parquet(snap_paths[IDENT_SNAP])
-ident_frame["record_id"] = (
-    ident_frame["county_id"].str.strip() + ":" + ident_frame["record_id"].astype(str)
-)
+if not ident_frame["record_id"].astype(str).str.contains(":").all():
+    # cached parquet predates the schema-level compound key: qualify it the same way
+    ident_frame["record_id"] = (
+        ident_frame["county_id"].str.strip() + ":" + ident_frame["record_id"].astype(str)
+    )
 assert not ident_frame["record_id"].duplicated().any(), "county:regnum must be unique"
 n_distinct_ages = int(ident_frame["age"].nunique())
 print(f"identifiability corpus: snapshot {IDENT_SNAP}, {len(ident_frame)} records, "

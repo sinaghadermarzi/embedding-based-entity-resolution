@@ -157,11 +157,13 @@ print((SCHEMA_DIR / "nc_voter.yaml").read_text())
 
 # %%
 nc_schema = DeclaredSchema.from_yaml(SCHEMA_DIR / "nc_voter.yaml")
+_id_cols = ([nc_schema.record_id] if isinstance(nc_schema.record_id, str)
+            else list(nc_schema.record_id))  # compound key: [county_id, voter_reg_num]
 _needed = [
     col
     for spec in nc_schema.roles.values()
     for col in ([spec] if isinstance(spec, str) else spec)
-] + [nc_schema.record_id, nc_schema.entity_id, *nc_schema.extra_keep]
+] + [*_id_cols, nc_schema.entity_id, *nc_schema.extra_keep]
 # CONSTRUCTED demo rows (not data): every needed column present, blanks space-padded NC-style.
 demo = pd.DataFrame({col: ["", ""] for col in dict.fromkeys(_needed)})
 demo.loc[0, ["first_name", "last_name", "house_num", "half_code"]] = ["MARY", "WARD", "12", " "]

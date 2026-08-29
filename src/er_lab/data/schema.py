@@ -77,7 +77,11 @@ class DeclaredSchema:
     """A source's column->role declaration (loaded from ``configs/schemas/*.yaml``)."""
 
     name: str
-    record_id: str  # source column, or ROW_SENTINEL to synthesize from row position
+    #: source column, ROW_SENTINEL to synthesize from row position, or a LIST of
+    #: source columns joined with ':' into a compound key — for sources whose row id
+    #: is only unique within a partition (NC: voter_reg_num per county, so
+    #: [county_id, voter_reg_num] -> 'county:regnum' is the statewide-unique id).
+    record_id: str | list[str]
     entity_id: str | None  # truth-key column; None when the source has no truth key
     roles: dict[str, str | list[str]]  # role -> source column(s); list order = join order
     extra_keep: list[str] = field(default_factory=list)
@@ -126,7 +130,7 @@ class DeclaredSchema:
         """
         needed = [c for spec in self.roles.values() for c in _cols(spec)]
         if self.record_id != ROW_SENTINEL:
-            needed.append(self.record_id)
+            needed.extend(_cols(self.record_id))
         if self.entity_id is not None:
             needed.append(self.entity_id)
         needed.extend(self.extra_keep)
@@ -145,6 +149,15 @@ class DeclaredSchema:
             out["record_id"] = pd.Series(
                 [str(i) for i in range(len(df))], index=df.index, dtype="string"
             )
+        elif isinstance(self.record_id, list):
+            # Compound key: parts are ids, not person content, so — unlike role joins —
+            # they are stripped (NC files space-pad short fields) and ':'-joined; a
+            # missing part propagates to NA so a broken key can never silently collide.
+            parts = [df[c].astype("string").str.strip() for c in self.record_id]
+            joined = parts[0]
+            for part in parts[1:]:
+                joined = joined + ":" + part
+            out["record_id"] = joined
         else:
             out["record_id"] = df[self.record_id].astype("string")
         if self.entity_id is None:

@@ -4,15 +4,17 @@
 #   (layout updated 02/15/2021; tab-delimited, header row, UTF-16 LE).
 # No full DOB in this source — 'age' only (identifiability hit; MET-06).
 # 'ncid' is the statewide pseudo-truth key, usable only if the MET-05 gate passes.
-# 'voter_reg_num' is unique per county only — county_id is kept in extra_keep so
-# (county_id, voter_reg_num) can disambiguate across counties.
+# 'voter_reg_num' is unique per county only, so record_id is the compound key
+# [county_id, voter_reg_num] -> 'county:regnum' (schema-constructed, statewide-unique;
+# PR #2 review finding — a single-column id silently collides on multi-county frames).
+# county_id also stays in extra_keep as its own column for county filters.
 # '#' in name fields and 'xx/xx/xxxx' registr_dt are county-review masking, delivered verbatim.
 # Blank fields are SPACE-PADDED in the real files (e.g. half_code=' ', street_dir=' '),
 # and multi-column joins keep whitespace-only parts VERBATIM by design — street joins
 # to e.g. '  WARD ST  '. The padding is part of the noise under study (PRS-01 owns
 # standardization upstream); see _join_verbatim in er_lab/data/schema.py.
 name: nc_voter
-record_id: voter_reg_num
+record_id: [county_id, voter_reg_num]
 entity_id: ncid
 roles:
   given_name: first_name

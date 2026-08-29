@@ -175,6 +175,10 @@ def test_weights_validation() -> None:
         bcubed(PRED, TRUTH, weights=pd.Series(0.0, index=PRED.index))
     with pytest.raises(ValueError, match="weights missing"):
         bcubed(PRED, TRUTH, weights=pd.Series({"a": 1.0}))
+    # Fractional weights would give W*(W-1)/2 < 0 pair masses (negative tp,
+    # NaN precision) — rejected up front rather than silently returned.
+    with pytest.raises(ValueError, match="integer-valued"):
+        pairwise(PRED, TRUTH, weights=pd.Series(0.5, index=PRED.index))
 
 
 # ------------------------------------------------------------------ blocking

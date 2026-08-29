@@ -888,6 +888,136 @@ display(deltas_df[["system", "vs", "protocol", "metric", "delta", "delta_lo", "d
                    "sign_stable", "exceeds_bar_residual"]].round(4))
 tick("§5b paired deltas", t_sec)
 
+# %% [markdown]
+# ### 5c. The leakage-controlled robustness arm — thresholds frozen on the train half
+#
+# A PR review (Codex, PR #2) flagged what §5a's protocol quietly does: the sweep picks
+# each system's threshold by maximizing **eval-set** recall subject to the precision
+# target measured on the **same eval labels**, and the CIs then condition on that winning
+# threshold — optimistic selection, with selection uncertainty omitted. That is the
+# series-wide protocol (every operating-point table in this lab shares it, cost points
+# included), and the pre-registered card scores exactly that arm. The honest response is
+# not to re-litigate the card but to measure the exposure: re-select every threshold on
+# the **entity-disjoint train half** — the same partition the calibration map was fit on,
+# never touched by any eval number — freeze it, apply it to eval unchanged, and re-score
+# the three clauses. If sign-stability survives frozen thresholds, eval-label tuning is
+# not what drives the verdict; if it does not, that fact belongs in the verdict box.
+
+# %%
+t_sec = time.time()
+TR_TEXTS = serialize_frame(
+    train_full, text_roles=TEXT_ROLES, scheme=SER_SCHEME, missing=SER_MISSING
+).tolist()
+EMB_TR = encoder.encode(TR_TEXTS, batch_size=ENC_BATCH)
+N_TR = len(train_full)
+TR_POS = pd.Series(np.arange(N_TR), index=train_full["record_id"].astype(str))
+truth_tr = train_full.set_index(train_full["record_id"].astype(str))["entity_id"]
+records_tr = pd.Index(truth_tr.index)
+assert records_tr.is_unique
+assert not records_tr.intersection(records_ev).size, "train/eval record leakage"
+TR_RECS = train_full.set_index(train_full["record_id"].astype(str))
+mk_tr = matchkeys.candidates(train_full, passes=matchkeys.default_passes(train_full))
+ann_tr = ann.candidates(train_full, EMB_TR, k=K_CAND, index="flat")
+tpairs = pd.concat([mk_tr, ann_tr], ignore_index=True)
+tpairs["a"], tpairs["b"] = tpairs["a"].astype(str), tpairs["b"].astype(str)
+tpairs = tpairs.drop_duplicates(subset=["a", "b"], keep="first").reset_index(drop=True)
+A_T = TR_RECS.loc[tpairs["a"]].reset_index(drop=True)
+B_T = TR_RECS.loc[tpairs["b"]].reset_index(drop=True)
+_ja = TR_POS.loc[tpairs["a"]].to_numpy()
+_jb = TR_POS.loc[tpairs["b"]].to_numpy()
+TP_PROB = calibrate(np.einsum("ij,ij->i", EMB_TR[_ja], EMB_TR[_jb]).astype(float))
+TP_JW = jw_standin(A_T, B_T)
+
+
+def eq_col_frames(col: str, ra: pd.DataFrame, rb: pd.DataFrame) -> np.ndarray:
+    va, vb = _norm_str(ra[col]).to_numpy(), _norm_str(rb[col]).to_numpy()
+    ok = ~(pd.isna(va) | pd.isna(vb))
+    out = np.zeros(len(ra), dtype=bool)
+    out[ok] = va[ok] == vb[ok]
+    return out
+
+
+OVERRIDE_TR = (eq_col_frames("given_name", A_T, B_T)
+               & eq_col_frames("family_name", A_T, B_T)
+               & eq_col_frames("dob", A_T, B_T))
+SYSTEMS_TR = {
+    "fs_standin": TP_JW,
+    "embedding": TP_PROB,
+    "hybrid_override": np.where(OVERRIDE_TR, 1.0, TP_PROB),
+}
+SFRAMES_TR = {name: pd.DataFrame({"a": tpairs["a"], "b": tpairs["b"],
+                                  "score": s, "prob": s})
+              for name, s in SYSTEMS_TR.items()}
+PRED_TR_CACHE: dict[tuple[str, float], pd.Series] = {}
+
+
+def pred_tr_at(system: str, thr: float) -> pd.Series:
+    key = (system, float(thr))
+    if key not in PRED_TR_CACHE:
+        PRED_TR_CACHE[key] = transitive_closure(
+            SFRAMES_TR[system], threshold=float(thr), records=records_tr)
+    return PRED_TR_CACHE[key]
+
+
+print(f"train-half selection arena: {N_TR:,} records / {int(truth_tr.nunique()):,} "
+      f"entities, {len(tpairs):,} union pairs (same recipe as eval; the calibration "
+      "partition — no eval label enters any selection below)")
+frozen_rows: list[dict] = []
+T_FROZEN: dict[tuple[str, float], float] = {}
+for system in SYSTEMS:
+    spairs_tr = SFRAMES_TR[system][["a", "b", "score"]]
+    for target in PREC_TARGETS:
+        res = find_threshold_for_precision(
+            spairs_tr, lambda t, s=system: pred_tr_at(s, t), truth_tr,
+            target=target, grid=GRID)
+        T_FROZEN[(system, target)] = float(res["threshold"])
+        moved = T_FROZEN[(system, target)] - T_AT[(system, target)]
+        flag = "" if res["attained"] else (
+            f"  <-- {target} unattained ON TRAIN (max {res['attained_precision']:.4f})"
+            " — PLAN §5 rail, selected there all the same")
+        print(f"[{system}] frozen@{target}: t={res['threshold']:.4f} selected on train "
+              f"(eval-tuned was {T_AT[(system, target)]:.4f}, moved {moved:+.4f}){flag}")
+        frozen_rows.append(op_row(
+            system, f"frozen@{target}", res["threshold"], row_type="op_frozen",
+            attained=float(res["attained"]), fallback=res["fallback"] or ""))
+frozen_ops_df = pd.DataFrame(frozen_rows)
+print("\neval performance at the FROZEN thresholds (entity-BCa 95% CIs):")
+display(frozen_ops_df[["system", "protocol", "threshold", "attained", "precision",
+                       "recall", "f1", "f1_lo", "f1_hi"]].round(4))
+
+frozen_delta_rows: list[dict] = []
+DELTA_FROZEN: dict[tuple[str, str, float, str], dict] = {}
+for target in PREC_TARGETS:
+    for sys_a, sys_b in COMPARISONS:
+        pa = pred_at(sys_a, T_FROZEN[(sys_a, target)])
+        pb = pred_at(sys_b, T_FROZEN[(sys_b, target)])
+        for metric in ("bcubed_f1", "bcubed_recall"):
+            res = paired_delta(pa, pb, truth_ev, metric, unit="entity", n_boot=N_BOOT,
+                               seed=PRIMARY_SEED)
+            DELTA_FROZEN[(sys_a, sys_b, target, metric)] = res
+            frozen_delta_rows.append({
+                "row_type": "delta_frozen", "system": sys_a, "vs": sys_b,
+                "protocol": f"frozen@{target}", "metric": metric,
+                "delta": res["delta"], "delta_lo": res["ci_low"],
+                "delta_hi": res["ci_high"], "sign_stable": bool(res["sign_stable"]),
+                "exceeds_bar_single": bool(abs(res["delta"]) >= BAR_SINGLE),
+                "exceeds_bar_residual": bool(abs(res["delta"]) >= BAR_RESID),
+                "basis": "MEASURED",
+            })
+frozen_deltas_df = pd.DataFrame(frozen_delta_rows)
+print("\nthe three clauses at FROZEN thresholds vs the protocol arm "
+      f"(primary point {PPRIM}):")
+for sys_a, sys_b in COMPARISONS:
+    d_ev = DELTA[(sys_a, sys_b, PREC_PRIMARY, "bcubed_f1")]
+    d_fr = DELTA_FROZEN[(sys_a, sys_b, PREC_PRIMARY, "bcubed_f1")]
+    same = (d_ev["delta"] > 0) == (d_fr["delta"] > 0) and d_fr["sign_stable"]
+    print(f"  {sys_a} - {sys_b}: eval-tuned {d_ev['delta']:+.4f} "
+          f"(sign_stable={d_ev['sign_stable']}) | frozen {d_fr['delta']:+.4f} "
+          f"[{d_fr['ci_low']:+.4f}, {d_fr['ci_high']:+.4f}] "
+          f"(sign_stable={d_fr['sign_stable']}) -> "
+          f"{'SURVIVES leakage-free selection' if same else 'DOES NOT SURVIVE'}")
+tick("§5c frozen-threshold robustness arm", t_sec)
+
 
 # %%
 # Pair-level AUC — RAW cosine, rank-native override (the Wave-4 binding convention).
@@ -973,7 +1103,8 @@ ledger_rows = [{"row_type": "ledger", "card_id": r["card_id"], "outcome": r["out
                 "notebook": r["notebook"], "card_sha256_12": r["sha256_12"],
                 "basis": "MEASURED"} for _, r in ledger.iterrows()]
 verdict_payload = flags_to_float(pd.concat(
-    [ops_df, deltas_df, auc_df, pd.DataFrame(ledger_rows)], ignore_index=True))
+    [ops_df, frozen_ops_df, deltas_df, frozen_deltas_df, auc_df,
+     pd.DataFrame(ledger_rows)], ignore_index=True))
 registry.register(
     "verdict_1e7", verdict_payload, cfg=cfg, tier=cfg.run.tier,
     meta={
@@ -994,6 +1125,12 @@ registry.register(
             "delta": "PAIRED shared-draw system delta (eval.bootstrap.paired_delta, "
                      "entity unit) per precision point and metric; exceeds_bar_* "
                      "compare |delta| against BOTH registered MET-04 bars",
+            "op_frozen": "the leakage-controlled robustness arm (§5c): the same "
+                         "operating points with thresholds selected and FROZEN on the "
+                         "entity-disjoint TRAIN half (the calibration partition), then "
+                         "applied to eval unchanged — no eval label enters selection",
+            "delta_frozen": "paired shared-draw deltas at the FROZEN thresholds — the "
+                            "clause check without eval-label threshold tuning",
             "auc": "pair-level AUC on the union graph subsample (pair bootstrap)",
             "auc_delta": "paired AUC delta on shared pair-bootstrap draws",
             "ledger": "the series scorecard: every registered conjecture card's "
@@ -1020,6 +1157,12 @@ registry.register(
                                "sign-stable NEGATIVE -> excluded)",
         },
         "protocol": {"precision_targets": list(PREC_TARGETS), "primary": PREC_PRIMARY,
+                     "threshold_selection": (
+                         "op/delta rows follow the series protocol: thresholds swept "
+                         "on the eval set itself — optimistic selection whose CIs "
+                         "condition on the winning threshold (PR #2 review finding); "
+                         "op_frozen/delta_frozen rows freeze thresholds on the "
+                         "disjoint train half first (leakage-controlled arm, §5c)"),
                      "cost_grid_fp_fn": [list(c) for c in COST_GRID], "grid": GRID,
                      "ci": {"unit": "entity", "method": "bca", "n_boot": N_BOOT,
                             "seed": PRIMARY_SEED},
@@ -1376,6 +1519,20 @@ _under_bar = [n for n, d in (("emb-FS", D_EMB_FS), ("hyb-emb", D_HYB_EMB),
                              ("hyb-FS", D_HYB_FS)) if abs(d["delta"]) < BAR_RESID]
 print(f"bar check (mandatory rider): deltas inside the residual-inclusive bar "
       f"{BAR_RESID:.4f}: {_under_bar if _under_bar else 'none'}")
+F_EMB_FS = DELTA_FROZEN[("embedding", "fs_standin", PREC_PRIMARY, "bcubed_f1")]
+F_HYB_EMB = DELTA_FROZEN[("hybrid_override", "embedding", PREC_PRIMARY, "bcubed_f1")]
+F_HYB_FS = DELTA_FROZEN[("hybrid_override", "fs_standin", PREC_PRIMARY, "bcubed_f1")]
+_frozen_ok = {
+    "P1": bool(F_EMB_FS["delta"] > 0 and F_EMB_FS["sign_stable"]),
+    "P2": bool(F_HYB_EMB["delta"] > 0 and F_HYB_EMB["sign_stable"]),
+    "P3": bool(F_HYB_FS["delta"] > 0 and F_HYB_FS["sign_stable"]),
+}
+frozen_survives = all(_frozen_ok.values())
+print(f"leakage control (§5c, frozen train-selected thresholds): P1 {_frozen_ok['P1']} "
+      f"({F_EMB_FS['delta']:+.4f}), P2 {_frozen_ok['P2']} ({F_HYB_EMB['delta']:+.4f}), "
+      f"P3 {_frozen_ok['P3']} ({F_HYB_FS['delta']:+.4f}) -> "
+      f"{'all clauses SURVIVE' if frozen_survives else 'NOT all clauses survive'} "
+      "without eval-label threshold selection")
 print(f"-> outcome: {outcome}")
 
 # %%
@@ -1394,7 +1551,16 @@ _ = verdict_box(
         f"registered hyb01 ledger says earned its place; the dob-year guard stays "
         f"excluded — its refutation stands). P3 {p3}: hybrid-override - FS "
         f"{D_HYB_FS['delta']:+.4f} [{D_HYB_FS['ci_low']:+.4f}, "
-        f"{D_HYB_FS['ci_high']:+.4f}]. Context the rule does not score, reported "
+        f"{D_HYB_FS['ci_high']:+.4f}]. Leakage control (PR #2 review): the protocol "
+        f"arm's thresholds are eval-swept (optimistic selection, CIs conditioned on "
+        f"the winner — the series-wide protocol the rule scores); re-selected and "
+        f"FROZEN on the disjoint train half they give P1' {F_EMB_FS['delta']:+.4f} "
+        f"[{F_EMB_FS['ci_low']:+.4f}, {F_EMB_FS['ci_high']:+.4f}], P2' "
+        f"{F_HYB_EMB['delta']:+.4f} [{F_HYB_EMB['ci_low']:+.4f}, "
+        f"{F_HYB_EMB['ci_high']:+.4f}], P3' {F_HYB_FS['delta']:+.4f} "
+        f"[{F_HYB_FS['ci_low']:+.4f}, {F_HYB_FS['ci_high']:+.4f}] — "
+        f"{'all three clauses survive' if frozen_survives else 'the clauses do NOT all survive'} "
+        f"leakage-free selection (delta_frozen rows). Context the rule does not score, reported "
         f"anyway: graph-wide pair AUC on the RAW cosine favors the FS stand-in "
         f"({AUC_PT['fs_standin']:.4f} vs embedding {AUC_PT['embedding']:.4f}) — ranking "
         f"everywhere and clustering at a fixed-precision point are different questions, "

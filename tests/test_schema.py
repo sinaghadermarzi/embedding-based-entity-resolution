@@ -115,6 +115,44 @@ def test_multicolumn_join_order_and_empty_parts(toy_schema: DeclaredSchema) -> N
     assert out["street_address"][2] is pd.NA
 
 
+def test_compound_record_id_strips_joins_and_propagates_na() -> None:
+    # NC's voter_reg_num is only county-unique (PR #2 review finding): a compound
+    # record_id [county_id, voter_reg_num] must yield a statewide-unique 'county:regnum'
+    # key — id parts are stripped (NC space-pads short fields; ids are keys, not the
+    # noise under study), and a missing part poisons the key to NA rather than
+    # silently colliding.
+    s = DeclaredSchema(
+        name="t",
+        record_id=["county_id", "regnum"],
+        entity_id=None,
+        roles={"given_name": "first"},
+    )
+    df = pd.DataFrame(
+        {
+            "county_id": [" 92", "7", None],
+            "regnum": ["000123", "000123", "9"],
+            "first": ["a", "b", "c"],
+        }
+    )
+    out = s.to_canonical(df)
+    assert out["record_id"][0] == "92:000123"
+    assert out["record_id"][1] == "7:000123"  # same regnum, different county: distinct
+    assert out["record_id"][2] is pd.NA
+    assert out["record_id"].dropna().is_unique
+
+
+def test_compound_record_id_from_yaml(tmp_path: Path) -> None:
+    p = tmp_path / "c.yaml"
+    p.write_text(
+        "name: c\nrecord_id: [county_id, rid]\nentity_id: null\n"
+        "roles:\n  given_name: first\n"
+    )
+    s = DeclaredSchema.from_yaml(p)
+    assert s.record_id == ["county_id", "rid"]
+    out = s.to_canonical(pd.DataFrame({"county_id": ["1"], "rid": ["x"], "first": ["a"]}))
+    assert out["record_id"][0] == "1:x"
+
+
 def test_join_keeps_whitespace_only_parts_verbatim() -> None:
     # NC snapshots space-pad blank fields (half_code=' ', street_dir=' ', ...);
     # whitespace-only parts are deliberately KEPT — the padding is part of the

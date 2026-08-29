@@ -89,6 +89,11 @@ def _aligned(
         raise ValueError("weights missing for some record ids")
     if not np.isfinite(w).all() or (w < 0).any():
         raise ValueError("weights must be finite and >= 0")
+    if (w != np.floor(w)).any():
+        raise ValueError(
+            "weights must be integer-valued duplication counts: pair masses use "
+            "W*(W-1)/2, which goes negative for cells with total weight below 1"
+        )
     if w.sum() == 0:
         raise ValueError("all weights are zero: nothing to evaluate")
     keep = w > 0
