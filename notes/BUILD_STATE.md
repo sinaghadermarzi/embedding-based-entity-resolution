@@ -73,8 +73,11 @@ not sign-stable), SCL-02, FAIR-01 (embedding helps both groups absolutely but it
 the low-exposure group +0.0112 — below both bars; membership SIMULATED, multipliers measured),
 ADP-01 (20 config lines, 0 package edits, but battery acceptance FAILS 5/8 slices on the starved
 pseudo-label pool — the chapter's lesson), EFF-02 (exploratory).
-Series totals (NB17 honesty audit, measured): 69/69 figures provenance-stamped, 31 RUN-IN-TARGET
-placards, 36 cards = 36 verdict boxes, 0 error outputs across all 20 executed notebooks.
+Series totals (measured): 73/73 figures provenance-stamped, 31 RUN-IN-TARGET placards, 37 card
+renders, 40 verdict boxes (0 without a registered card), 0 error outputs across all 20 executed
+notebooks — the post-execution view (`tools/honesty_audit.py`, matching the newest registered
+`honesty_audit` run). NB17's in-series first execution printed 69/69, 36 = 36: it counts itself
+via a flagged pre-execution self-scan row; the delta is exactly its own rendered outputs.
 
 ## Key facts a resumed session needs
 
