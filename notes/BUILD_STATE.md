@@ -2,7 +2,7 @@
 
 *Purpose: survive session compaction/restarts. If you are resuming work on this branch, read this
 file, PLAN.md, and the newest wave-review output listed below — that is the whole map.*
-*Last updated: 2026-08-25, during Wave 4 execution.*
+*Last updated: 2026-08-29, at Wave 4 completion. Paused for usage-limit reset before Wave 5.*
 
 ## Where we are
 
@@ -13,8 +13,8 @@ file, PLAN.md, and the newest wave-review output listed below — that is the wh
 | Notebooks Wave 1 (00–03) | DONE, reviewed, re-executed | `d1de833` |
 | Notebooks Wave 2 (04–07) | DONE, reviewed, re-executed | `526795a`, `f82aba2` |
 | Notebooks Wave 3 (08–11) | DONE, reviewed, re-executed | `37648fc` (final; earlier WIP snapshots superseded) |
-| Notebooks Wave 4 (12–15) | IN FLIGHT — sequential build 12→13→14→15 + adversarial review | workflow `wf_a1b108ef-50a`; output lands at `/tmp/claude-0/.../tasks/w55j0k34q.output` |
-| Notebooks Wave 5 (16, 17, 18, A) | NOT STARTED — **paused for usage-limit reset after Wave 4 commits** | wave spec in the session plan file; DAG rows in `src/er_lab/infra/runner.py` |
+| Notebooks Wave 4 (12–15) | DONE, reviewed (6 findings), fixed, re-executed | wave-final commit (supersedes WIP `ae31297..40a3a78`); review output `/tmp/claude-0/.../tasks/w916txy9t.output`, fixer report `.../tasks/ab2d379222ae211c5.output` |
+| Notebooks Wave 5 (16, 17, 18, A) | NOT STARTED — **paused for usage-limit reset; begins only on the user's explicit continue** | wave spec in the session plan file; DAG rows in `src/er_lab/infra/runner.py` |
 | B-9 finalization | NOT STARTED | README (measured quickstart), `tools/honesty_audit.py`, `notes/RUN_IN_TARGET.md` manifest, fresh-venv full-series smoke pass |
 
 ## Process pattern (every wave)
@@ -39,6 +39,11 @@ commits mid-wave are normal; the wave-final commit supersedes them.
   counts and (since Wave 3) identical-init param hashes.
 - **Detectability bars**: quote both `detect_bar_single_seed` and `detect_bar_residual_inclusive`
   from `met04_power_table` meta in any single-seed ranking discussion.
+- **Ranking metrics (AUC etc.) score the raw cosine**, never tie-collapsed calibrated
+  probabilities (Wave-4 review: isotonic's 83-step grid distorted AUC by 0.019; AUC is invariant
+  only under *strictly* monotone maps). Rules enter AUC arms rank-natively
+  (`apply_rules_ranknative` pattern in NB14); entity operating points keep calibrated probs.
+  Declare the scored representation in the artifact meta.
 - `# [RUN-IN-TARGET mac|node]` cells are real tier-gated code printing placards at smoke.
 - Registry is append-only; smoke/target artifacts never mix (runner gates on DAG `requires`).
 
@@ -46,12 +51,18 @@ commits mid-wave are normal; the wave-final commit supersedes them.
 
 CONFIRMED: NB00-quickstart, MET-01, MET-02, MET-03, NSE-01, NSE-02, MET-07 (null-instrument),
 TRN-05 (single-seed scope), MET-04 (post full_name-exclusion: seed sd 0.0305, 73 seeds for a 0.01
-delta), LABEL-PROV (+0.074 sign-stable).
+delta), LABEL-PROV (+0.074 sign-stable), CLU-01 (scheme spread 0.064 < bar), SCL-01 (≤1e6 fits
+predict 1e7 within CI), PRS-01 (parsing flips nothing but like-for-like DnD +0.1606
+[+0.1557, +0.1653] on raw cosine; sign survives the leak-free 35,181-pair subset).
 REFUTED (the refutation is the finding): NB01-NC-ACQUISITION (dup-NCID 3.2–3.7%), BAS-01 (tuned FS
 F 0.78 < predicted 0.90), NB07-CHAIN-MERGE (percolation denied by blocking + TF; fusions are small
-dense household clusters).
+dense household clusters), BAS-02 (BM25 ≥ dense at every matched budget; gap +0.279 recall@k=25),
+HYB-01 (dob-year guard HURTS −0.0190 B³F1 sign-stable, 28.7% of guard fires are true pairs;
+override +0.0247 sign-stable positive — rules earn their place individually, not as a class).
 UNEXPLAINED: NB08-BATTERY, TRN-01, TRN-02, TRN-03, TRN-04 (partial: pretrained side is
-RUN-IN-TARGET mac), TRN-06, TRN-05-MISSING-STRESS.
+RUN-IN-TARGET mac), TRN-06, TRN-05-MISSING-STRESS, CAL-01, NSE-03 (raw-cosine scored: no
+sign-stable ranking reversal across noise models; NC-real flips to hyb>fs>emb but adjacent deltas
+not sign-stable), SCL-02.
 
 ## Key facts a resumed session needs
 
