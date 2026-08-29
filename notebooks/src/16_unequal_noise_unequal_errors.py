@@ -1916,6 +1916,13 @@ _ = verdict_box(
 # by NCID, the join NB05 could not make on historical_50k), the statewide exposure refit
 # (NB04's [RUN-IN-TARGET node] rerun, where small race groups and the U sex group gain
 # the counts to be scored), met04-sized replicates, and BOTH operating-point families.
+# PRE-REGISTERED AMENDMENT for that run's card (review finding, Wave 5): the smoke card's
+# guard/refutation clauses borrow the MET-04 residual-inclusive bar (0.0865, B³F1 units)
+# for per-group RATE deltas that measure ~0.005–0.03 here — near-untrippable by scale
+# mismatch. The node card must derive a RATE-scale detectability bar (replicate SD of
+# per-group missed/false rates across its met04-sized seed replicates) and threshold the
+# guard/refutation clauses against THAT, so P2/P4 and the refutation clause carry real
+# power at the definitive tier.
 # Estimates below use THIS run's measured coefficients (4-CPU container, possibly 2-4x
 # contended — planning numbers, re-measured on arrival).
 if TIER in ("mid", "target"):
