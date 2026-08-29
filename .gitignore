@@ -1,0 +1,8 @@
+# data and artifacts are never committed (anchored: src/er_lab/data IS committed)
+/data/
+/artifacts/
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+notebooks/data/

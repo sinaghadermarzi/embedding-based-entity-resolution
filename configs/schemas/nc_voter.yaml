@@ -1,0 +1,37 @@
+# NC voter registration statewide snapshot (VR_SNAPSHOT_YYYYMMDD).
+# Column names VERIFIED 2026-08-24 against
+#   https://s3.amazonaws.com/dl.ncsbe.gov/data/Snapshots/layout_VR_Snapshot.txt
+#   (layout updated 02/15/2021; tab-delimited, header row, UTF-16 LE).
+# No full DOB in this source — 'age' only (identifiability hit; MET-06).
+# 'ncid' is the statewide pseudo-truth key, usable only if the MET-05 gate passes.
+# 'voter_reg_num' is unique per county only, so record_id is the compound key
+# [county_id, voter_reg_num] -> 'county:regnum' (schema-constructed, statewide-unique;
+# PR #2 review finding — a single-column id silently collides on multi-county frames).
+# county_id also stays in extra_keep as its own column for county filters.
+# '#' in name fields and 'xx/xx/xxxx' registr_dt are county-review masking, delivered verbatim.
+# Blank fields are SPACE-PADDED in the real files (e.g. half_code=' ', street_dir=' '),
+# and multi-column joins keep whitespace-only parts VERBATIM by design — street joins
+# to e.g. '  WARD ST  '. The padding is part of the noise under study (PRS-01 owns
+# standardization upstream); see _join_verbatim in er_lab/data/schema.py.
+name: nc_voter
+record_id: [county_id, voter_reg_num]
+entity_id: ncid
+roles:
+  given_name: first_name
+  middle_name: midl_name
+  family_name: last_name
+  name_suffix: name_sufx_cd
+  age: age
+  sex: sex_code
+  race: race_code
+  ethnicity: ethnic_code
+  house_number: [house_num, half_code]
+  street: [street_dir, street_name, street_type_cd, street_sufx_cd]
+  unit: unit_num
+  city: res_city_desc
+  state: state_cd
+  zip: zip_code
+  phone: [area_cd, phone_num]
+  county: county_desc
+  snapshot_date: snapshot_dt
+extra_keep: [county_id, status_cd, registr_dt]
